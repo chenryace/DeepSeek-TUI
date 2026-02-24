@@ -101,6 +101,21 @@ fn tool_exec_outcome_tracks_duration() {
 }
 
 #[test]
+fn yolo_mode_keeps_tools_preloaded() {
+    assert!(!should_default_defer_tool("exec_shell", AppMode::Yolo));
+    assert!(!should_default_defer_tool(
+        "mcp_read_resource",
+        AppMode::Yolo
+    ));
+}
+
+#[test]
+fn non_yolo_mode_retains_default_defer_policy() {
+    assert!(should_default_defer_tool("exec_shell", AppMode::Agent));
+    assert!(!should_default_defer_tool("read_file", AppMode::Agent));
+}
+
+#[test]
 fn detects_context_length_errors_from_provider_payloads() {
     let msg = r#"SSE stream request failed: HTTP 400 Bad Request: {"error":{"message":"This model's maximum context length is 131072 tokens. However, you requested 153056 tokens (148960 in the messages, 4096 in the completion).","type":"invalid_request_error"}}"#;
     assert!(is_context_length_error_message(msg));

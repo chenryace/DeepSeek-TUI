@@ -15,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 - Model selection and config validation now accept any valid `deepseek-*` model ID (including future releases), while still normalizing common aliases like `deepseek-v3.2` and `deepseek-r1`.
 - Tool-call recovery now auto-loads deferred tools when the model requests them directly, instead of failing with manual `tool_search_*` instructions.
+- YOLO mode now preloads tools by default (including deferred MCP tools), so model tool calls can run immediately without discovery indirection.
 - Unknown tool-call failures now include discovery guidance and nearest tool-name suggestions instead of generic availability errors.
 - Slash-command errors now suggest the closest known command (for example `/modle` -> `/model`) instead of only returning a generic unknown-command message.
 

@@ -533,7 +533,11 @@ fn is_tool_search_tool(name: &str) -> bool {
     matches!(name, TOOL_SEARCH_REGEX_NAME | TOOL_SEARCH_BM25_NAME)
 }
 
-fn should_default_defer_tool(name: &str) -> bool {
+fn should_default_defer_tool(name: &str, mode: AppMode) -> bool {
+    if mode == AppMode::Yolo {
+        return false;
+    }
+
     !matches!(
         name,
         "read_file"
@@ -1504,13 +1508,17 @@ impl Engine {
         let tools = tool_registry.as_ref().map(|registry| {
             let mut tools = registry.to_api_tools();
             for tool in &mut tools {
-                tool.defer_loading = Some(should_default_defer_tool(&tool.name));
+                tool.defer_loading = Some(should_default_defer_tool(&tool.name, mode));
             }
             let mut mcp_tools = mcp_tools;
             for tool in &mut mcp_tools {
-                let name = tool.name.as_str();
+                if mode == AppMode::Yolo {
+                    tool.defer_loading = Some(false);
+                    continue;
+                }
+
                 let keep_loaded = matches!(
-                    name,
+                    tool.name.as_str(),
                     "list_mcp_resources"
                         | "list_mcp_resource_templates"
                         | "mcp_read_resource"
