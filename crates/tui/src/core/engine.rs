@@ -2895,8 +2895,8 @@ impl Engine {
             // assistant message in the conversation history. Saving a
             // placeholder here keeps the on-disk session structurally
             // correct so subsequent requests won't 400.
-            let needs_thinking_block = !tool_uses.is_empty()
-                || tool_parser::has_tool_call_markers(&current_text_raw);
+            let needs_thinking_block =
+                !tool_uses.is_empty() || tool_parser::has_tool_call_markers(&current_text_raw);
             let thinking_to_persist = if !current_thinking.is_empty() {
                 Some(current_thinking.clone())
             } else if needs_thinking_block {

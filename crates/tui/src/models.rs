@@ -297,7 +297,8 @@ pub fn compaction_threshold_for_model_and_effort(
     reasoning_effort: Option<&str>,
 ) -> usize {
     let lower = model.to_lowercase();
-    if !lower.contains("deepseek") || !(lower.contains("v4") || is_current_deepseek_v4_alias(&lower))
+    if !lower.contains("deepseek")
+        || !(lower.contains("v4") || is_current_deepseek_v4_alias(&lower))
     {
         return compaction_threshold_for_model(model);
     }

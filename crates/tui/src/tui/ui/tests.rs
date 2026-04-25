@@ -445,7 +445,10 @@ fn footer_auxiliary_spans_show_cache_and_cost_when_roomy() {
     let roomy = spans_text(&footer_auxiliary_spans(&app, 32));
     assert!(roomy.contains("cache 75%"));
     assert!(roomy.contains("$12.34"));
-    assert!(!roomy.contains("ctx"), "context % removed from footer — shown in header only");
+    assert!(
+        !roomy.contains("ctx"),
+        "context % removed from footer — shown in header only"
+    );
 }
 
 #[test]
