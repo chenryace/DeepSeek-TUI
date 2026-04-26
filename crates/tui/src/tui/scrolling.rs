@@ -1,10 +1,30 @@
 //! Scroll state tracking for transcript rendering.
+//!
+//! The transcript view uses a flat line-index scroll model: a single `offset`
+//! into the rendered line-meta buffer points at the top visible line, with
+//! `usize::MAX` reserved as a sentinel meaning "stuck to the live tail."
+//!
+//! Why a flat offset, not cell anchors? An earlier design anchored the
+//! viewport to a `(cell_index, line_in_cell)` pair on the assumption that
+//! the cell list was append-only. It is not — content rewrites (RLM `repl`
+//! blocks expanding into `Thinking + Text`, tool result replacements, and
+//! compaction) can renumber or remove cells underneath the user. When the
+//! anchor cell vanished the viewport teleported to the bottom (issue #56)
+//! or "got stuck" because the next keypress would resolve from `max_start`.
+//!
+//! Codex's pager uses the same line-offset shape; see
+//! `codex-rs/tui/src/pager_overlay.rs::PagerView`.
 
 use std::time::{Duration, Instant};
 
 // === Transcript Line Metadata ===
 
 /// Metadata describing how rendered transcript lines map to history cells.
+///
+/// The scroll state itself does not consult this — it only stores a flat
+/// line offset — but other render-time helpers (selection painting,
+/// send-flash, jump-to-tool, scrollbar percent) still need the
+/// line→cell mapping the cache exposes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TranscriptLineMeta {
     CellLine {
@@ -28,94 +48,88 @@ impl TranscriptLineMeta {
     }
 }
 
-// === Scroll Anchors ===
+// === Transcript Scroll State ===
 
-/// Scroll anchor for the transcript view.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum TranscriptScroll {
-    #[default]
-    ToBottom,
-    Scrolled {
-        cell_index: usize,
-        line_in_cell: usize,
-    },
-    ScrolledSpacerBeforeCell {
-        cell_index: usize,
-    },
+/// Sentinel offset meaning "stuck to live tail" — the renderer translates
+/// this to `max_start` at draw time, so newly appended lines pull the view
+/// down with them.
+const TAIL_SENTINEL: usize = usize::MAX;
+
+/// Flat line-offset scroll state for the transcript view.
+///
+/// Stores the index of the top visible line into the cache's `line_meta`
+/// buffer, or [`TAIL_SENTINEL`] (`usize::MAX`) to mean "stuck to bottom."
+/// The renderer resolves the sentinel against the current line count and
+/// viewport height every frame, so content rewrites simply clamp the
+/// user's offset rather than triggering anchor recovery heuristics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TranscriptScroll {
+    offset: usize,
+}
+
+impl Default for TranscriptScroll {
+    /// Default state is "stuck to live tail" — matches the historical
+    /// `TranscriptScroll::ToBottom` behaviour callers already depend on.
+    fn default() -> Self {
+        Self::to_bottom()
+    }
 }
 
 impl TranscriptScroll {
-    /// Resolve the anchor to a top line index.
-    ///
-    /// When the original anchor cell no longer exists (because content was
-    /// rewritten — e.g. an inline RLM `repl` block expanded into
-    /// `Thinking + Text`, or a tool result was replaced) we used to fall
-    /// straight to `ToBottom`, which felt like the view "got stuck" because
-    /// the user's next Up press would teleport-then-recompute from the
-    /// bottom. Instead, clamp to the nearest surviving cell so scroll
-    /// position is preserved across rewrites.
+    /// State that follows the live tail (default).
     #[must_use]
-    pub fn resolve_top(self, line_meta: &[TranscriptLineMeta], max_start: usize) -> (Self, usize) {
-        match self {
-            TranscriptScroll::ToBottom => (TranscriptScroll::ToBottom, max_start),
-            TranscriptScroll::Scrolled {
-                cell_index,
-                line_in_cell,
-            } => {
-                if let Some(idx) = anchor_index(line_meta, cell_index, line_in_cell) {
-                    return (self, idx.min(max_start));
-                }
-                // Fallback 1: same cell, top line — handles cases where the
-                // line count for a cell shrank (e.g. text was condensed).
-                if let Some(idx) = anchor_index(line_meta, cell_index, 0) {
-                    return (
-                        TranscriptScroll::Scrolled {
-                            cell_index,
-                            line_in_cell: 0,
-                        },
-                        idx.min(max_start),
-                    );
-                }
-                // Fallback 2: nearest surviving cell at or before the
-                // requested cell index. Walks line_meta once.
-                if let Some((ci, li, idx)) = nearest_cell_at_or_before(line_meta, cell_index) {
-                    return (
-                        TranscriptScroll::Scrolled {
-                            cell_index: ci,
-                            line_in_cell: li,
-                        },
-                        idx.min(max_start),
-                    );
-                }
-                // Last resort — there are no cell lines at all (empty
-                // transcript). ToBottom is fine here.
-                (TranscriptScroll::ToBottom, max_start)
-            }
-            TranscriptScroll::ScrolledSpacerBeforeCell { cell_index } => {
-                if let Some(idx) = spacer_before_cell_index(line_meta, cell_index) {
-                    return (self, idx.min(max_start));
-                }
-                if let Some((ci, li, idx)) = nearest_cell_at_or_before(line_meta, cell_index) {
-                    return (
-                        TranscriptScroll::Scrolled {
-                            cell_index: ci,
-                            line_in_cell: li,
-                        },
-                        idx.min(max_start),
-                    );
-                }
-                (TranscriptScroll::ToBottom, max_start)
-            }
+    pub const fn to_bottom() -> Self {
+        Self {
+            offset: TAIL_SENTINEL,
         }
     }
 
-    /// Apply a delta scroll and return the updated anchor.
+    /// State pinned to a specific line index.
+    #[must_use]
+    pub const fn at_line(offset: usize) -> Self {
+        Self { offset }
+    }
+
+    /// Returns true when the view is following the live tail.
+    #[must_use]
+    pub const fn is_at_tail(self) -> bool {
+        self.offset == TAIL_SENTINEL
+    }
+
+    /// Resolve the scroll state to a concrete top line index.
     ///
-    /// When the existing anchor cell is gone (content rewrite), fall back to
-    /// the nearest surviving cell instead of `max_start`. Without that, an
-    /// Up press from a missing-anchor state would resolve `current_top` to
-    /// the bottom and then walk up by `delta`, teleporting the user near
-    /// the bottom of the transcript.
+    /// `max_start` is `total_lines.saturating_sub(visible_lines)`. The
+    /// returned `Self` is the canonicalized state — if the resolved top
+    /// reached the tail (or the transcript fits in one screen) we collapse
+    /// to [`TranscriptScroll::to_bottom`], so the caller can treat the
+    /// returned state as authoritative.
+    ///
+    /// `line_meta` is accepted for API compatibility with the previous
+    /// cell-anchored implementation. It is unused here because the flat
+    /// offset model needs no cell-index lookup; we just clamp.
+    #[must_use]
+    pub fn resolve_top(self, line_meta: &[TranscriptLineMeta], max_start: usize) -> (Self, usize) {
+        let _ = line_meta;
+        if self.offset == TAIL_SENTINEL {
+            return (Self::to_bottom(), max_start);
+        }
+        let top = self.offset.min(max_start);
+        if top >= max_start {
+            (Self::to_bottom(), max_start)
+        } else {
+            (Self::at_line(top), top)
+        }
+    }
+
+    /// Apply a scroll delta and return the updated state.
+    ///
+    /// `delta_lines` is signed: negative scrolls up (toward the start),
+    /// positive scrolls down (toward the tail). When the resolved offset
+    /// hits `max_start` we snap to [`TranscriptScroll::to_bottom`] so
+    /// subsequent appended content pulls the view along.
+    ///
+    /// `line_meta` is accepted for API compatibility; only its length is
+    /// consulted. `visible_lines` controls the page size for clamping.
     #[must_use]
     pub fn scrolled_by(
         self,
@@ -129,28 +143,15 @@ impl TranscriptScroll {
 
         let total_lines = line_meta.len();
         if total_lines <= visible_lines {
-            return TranscriptScroll::ToBottom;
+            // Whole transcript fits; only "tail" is meaningful.
+            return Self::to_bottom();
         }
 
         let max_start = total_lines.saturating_sub(visible_lines);
-        let current_top = match self {
-            TranscriptScroll::ToBottom => max_start,
-            TranscriptScroll::Scrolled {
-                cell_index,
-                line_in_cell,
-            } => anchor_index(line_meta, cell_index, line_in_cell)
-                .or_else(|| anchor_index(line_meta, cell_index, 0))
-                .or_else(|| nearest_cell_at_or_before(line_meta, cell_index).map(|(_, _, idx)| idx))
-                .unwrap_or(max_start)
-                .min(max_start),
-            TranscriptScroll::ScrolledSpacerBeforeCell { cell_index } => {
-                spacer_before_cell_index(line_meta, cell_index)
-                    .or_else(|| {
-                        nearest_cell_at_or_before(line_meta, cell_index).map(|(_, _, idx)| idx)
-                    })
-                    .unwrap_or(max_start)
-                    .min(max_start)
-            }
+        let current_top = if self.offset == TAIL_SENTINEL {
+            max_start
+        } else {
+            self.offset.min(max_start)
         };
 
         let new_top = if delta_lines < 0 {
@@ -161,133 +162,25 @@ impl TranscriptScroll {
         };
 
         if new_top >= max_start {
-            TranscriptScroll::ToBottom
+            Self::to_bottom()
         } else {
-            TranscriptScroll::anchor_for(line_meta, new_top).unwrap_or(TranscriptScroll::ToBottom)
+            Self::at_line(new_top)
         }
     }
 
-    /// Create an anchor from a top line index.
+    /// Pin the scroll state to a specific line index in the rendered
+    /// transcript (saturating to the meta buffer length).
+    ///
+    /// Returns `None` if `line_meta` is empty (caller should default to
+    /// [`TranscriptScroll::to_bottom`] in that case).
     #[must_use]
     pub fn anchor_for(line_meta: &[TranscriptLineMeta], start: usize) -> Option<Self> {
         if line_meta.is_empty() {
             return None;
         }
-
-        let start = start.min(line_meta.len().saturating_sub(1));
-        match line_meta[start] {
-            TranscriptLineMeta::CellLine {
-                cell_index,
-                line_in_cell,
-            } => Some(TranscriptScroll::Scrolled {
-                cell_index,
-                line_in_cell,
-            }),
-            TranscriptLineMeta::Spacer => {
-                if let Some((cell_index, _)) = anchor_at_or_after(line_meta, start) {
-                    Some(TranscriptScroll::ScrolledSpacerBeforeCell { cell_index })
-                } else {
-                    anchor_at_or_before(line_meta, start).map(|(cell_index, line_in_cell)| {
-                        TranscriptScroll::Scrolled {
-                            cell_index,
-                            line_in_cell,
-                        }
-                    })
-                }
-            }
-        }
+        let clamped = start.min(line_meta.len().saturating_sub(1));
+        Some(Self::at_line(clamped))
     }
-}
-
-fn anchor_index(
-    line_meta: &[TranscriptLineMeta],
-    cell_index: usize,
-    line_in_cell: usize,
-) -> Option<usize> {
-    line_meta
-        .iter()
-        .enumerate()
-        .find_map(|(idx, entry)| match *entry {
-            TranscriptLineMeta::CellLine {
-                cell_index: ci,
-                line_in_cell: li,
-            } if ci == cell_index && li == line_in_cell => Some(idx),
-            _ => None,
-        })
-}
-
-fn spacer_before_cell_index(line_meta: &[TranscriptLineMeta], cell_index: usize) -> Option<usize> {
-    line_meta.iter().enumerate().find_map(|(idx, entry)| {
-        if matches!(entry, TranscriptLineMeta::Spacer)
-            && line_meta
-                .get(idx + 1)
-                .and_then(TranscriptLineMeta::cell_line)
-                .is_some_and(|(ci, _)| ci == cell_index)
-        {
-            Some(idx)
-        } else {
-            None
-        }
-    })
-}
-
-fn anchor_at_or_after(line_meta: &[TranscriptLineMeta], start: usize) -> Option<(usize, usize)> {
-    line_meta
-        .iter()
-        .enumerate()
-        .skip(start)
-        .find_map(|(_, entry)| entry.cell_line())
-}
-
-fn anchor_at_or_before(line_meta: &[TranscriptLineMeta], start: usize) -> Option<(usize, usize)> {
-    line_meta
-        .iter()
-        .enumerate()
-        .take(start.saturating_add(1))
-        .rev()
-        .find_map(|(_, entry)| entry.cell_line())
-}
-
-/// Walk `line_meta` once and return the highest-priority surviving cell
-/// position whose `cell_index <= target`. Used as a fallback when the
-/// original anchor cell was removed by a content rewrite — keeps the user
-/// near where they were instead of teleporting to the bottom.
-///
-/// Returns `(cell_index, line_in_cell, line_meta_index)`.
-fn nearest_cell_at_or_before(
-    line_meta: &[TranscriptLineMeta],
-    target: usize,
-) -> Option<(usize, usize, usize)> {
-    let mut best: Option<(usize, usize, usize)> = None;
-    for (idx, entry) in line_meta.iter().enumerate() {
-        if let TranscriptLineMeta::CellLine {
-            cell_index,
-            line_in_cell,
-        } = *entry
-            && cell_index <= target
-        {
-            match best {
-                None => best = Some((cell_index, line_in_cell, idx)),
-                Some((bci, _, _)) if cell_index >= bci => {
-                    best = Some((cell_index, line_in_cell, idx));
-                }
-                _ => {}
-            }
-        }
-    }
-    // Fall back to the very first surviving cell if nothing matched.
-    if best.is_none() {
-        for (idx, entry) in line_meta.iter().enumerate() {
-            if let TranscriptLineMeta::CellLine {
-                cell_index,
-                line_in_cell,
-            } = *entry
-            {
-                return Some((cell_index, line_in_cell, idx));
-            }
-        }
-    }
-    best
 }
 
 /// Direction for mouse scroll input.
@@ -369,124 +262,175 @@ mod tests {
         meta
     }
 
-    /// Regression test for the "stuck after content rewrite" bug from
-    /// issue #56. When the anchor cell still exists, scroll position is
-    /// preserved.
+    /// Default state follows the live tail. Resolving against any
+    /// `max_start` returns `max_start` and the canonical tail state.
     #[test]
-    fn resolve_top_keeps_position_when_anchor_cell_exists() {
-        let meta = synth_line_meta(5, 3); // 5 cells × 3 lines + 4 spacers = 19 entries
+    fn default_state_is_tail() {
+        let state = TranscriptScroll::default();
+        assert!(state.is_at_tail());
+        let meta = synth_line_meta(5, 3);
+        let max_start = 6;
+        let (resolved, top) = state.resolve_top(&meta, max_start);
+        assert!(resolved.is_at_tail());
+        assert_eq!(top, max_start);
+    }
+
+    /// A pinned offset below `max_start` resolves to itself unchanged.
+    /// (Originally: "anchor cell still exists" — same intent: scroll
+    /// position is preserved when it is still valid.)
+    #[test]
+    fn resolve_top_keeps_position_when_offset_in_range() {
+        let meta = synth_line_meta(5, 3); // 19 entries
         let max_start = meta.len().saturating_sub(8);
-        let anchor = TranscriptScroll::Scrolled {
-            cell_index: 2,
-            line_in_cell: 1,
-        };
-        let (state, top) = anchor.resolve_top(&meta, max_start);
-        assert_eq!(state, anchor);
-        // Cell 2, line 1 sits at: 0,1,2 (cell 0), spacer, 4,5,6 (cell 1),
-        // spacer, 8,9,10 (cell 2) — line 1 of cell 2 is index 9.
+        let state = TranscriptScroll::at_line(9);
+        let (resolved, top) = state.resolve_top(&meta, max_start);
+        assert_eq!(resolved, TranscriptScroll::at_line(9));
         assert_eq!(top, 9);
     }
 
-    /// Regression test for issue #56: when a content rewrite removes the
-    /// anchor cell, the previous behaviour was to teleport to ToBottom.
-    /// Now we clamp to the nearest surviving cell at-or-before the
-    /// requested cell index.
+    /// Regression for issue #56: when a content rewrite shrinks the
+    /// transcript so the user's offset is past the new `max_start`, we
+    /// clamp to the new max — we must NOT teleport to the top, and we
+    /// must NOT silently lose the position by sending the user to the
+    /// raw bottom of pre-rewrite content. Snapping to the tail is the
+    /// correct behaviour because the user's intended position no longer
+    /// has any content under it.
     #[test]
-    fn resolve_top_clamps_to_nearest_cell_when_anchor_cell_removed() {
-        // Original transcript had cells 0..5; a rewrite shrunk it to 0..3.
-        // The anchor pointed at cell 4 — that cell no longer exists.
-        let meta = synth_line_meta(3, 2); // cells 0..3, 2 lines each + 2 spacers
-        let max_start = meta.len();
-        let stale_anchor = TranscriptScroll::Scrolled {
-            cell_index: 4,
-            line_in_cell: 0,
-        };
-        let (state, top) = stale_anchor.resolve_top(&meta, max_start);
-        // Should clamp to the highest-indexed surviving cell (cell 2)
-        // rather than ToBottom.
-        match state {
-            TranscriptScroll::Scrolled { cell_index, .. } => assert_eq!(cell_index, 2),
-            other => panic!("expected Scrolled, got {other:?}"),
-        }
-        // top should be a valid index into meta, not max_start.
-        assert!(top < meta.len());
+    fn resolve_top_clamps_when_offset_past_max_start() {
+        let meta = synth_line_meta(3, 2); // 8 entries (cells 0..3, 2 lines + 2 spacers)
+        let max_start = meta.len().saturating_sub(4);
+        // User had scrolled to a line that no longer exists post-rewrite.
+        let state = TranscriptScroll::at_line(15);
+        let (resolved, top) = state.resolve_top(&meta, max_start);
+        // Past max_start collapses to tail (which is the right answer:
+        // there is no content beyond max_start to show).
+        assert!(resolved.is_at_tail());
+        assert_eq!(top, max_start);
     }
 
-    /// Same fallback behaviour applies when scrolling further by a delta:
-    /// scrolled_by computes its current_top from the (stale) anchor and
-    /// the user's keypress should still move them up rather than locking
-    /// them near the bottom.
+    /// Regression for the new bug we are guarding against in this
+    /// refactor: scrolling up to mid-transcript, having the content
+    /// rewrite under us, and then drawing again must preserve the
+    /// offset (clamped if needed) and NOT teleport to top or to bottom
+    /// when the offset is still in-range.
     #[test]
-    fn scrolled_by_does_not_teleport_on_missing_anchor() {
-        let meta = synth_line_meta(3, 2);
+    fn resolve_top_preserves_midway_offset_after_content_rewrite() {
+        // Pre-rewrite transcript: 10 cells × 3 lines + 9 spacers = 39 lines.
+        let pre = synth_line_meta(10, 3);
+        let visible = 8;
+        let pre_max_start = pre.len().saturating_sub(visible);
+
+        // User scrolls up to a midway line (line 12).
+        let state = TranscriptScroll::at_line(12);
+        let (state, top_before) = state.resolve_top(&pre, pre_max_start);
+        assert_eq!(top_before, 12);
+        assert_eq!(state, TranscriptScroll::at_line(12));
+
+        // Content rewrite: cell 4 expanded by two lines (e.g. inline
+        // RLM `repl` block became Thinking + Text). Total grows.
+        let mut post = pre.clone();
+        post.insert(13, cell_line(4, 3));
+        post.insert(14, cell_line(4, 4));
+        let post_max_start = post.len().saturating_sub(visible);
+        let (state2, top_after) = state.resolve_top(&post, post_max_start);
+        // Critical: still at line 12, not pulled to bottom or top.
+        assert_eq!(state2, TranscriptScroll::at_line(12));
+        assert_eq!(top_after, 12);
+
+        // Content rewrite shrunk transcript below the offset.
+        let post_shrunk = synth_line_meta(3, 3); // 11 lines total
+        let shrunk_max_start = post_shrunk.len().saturating_sub(visible);
+        let (state3, top_shrunk) = state.resolve_top(&post_shrunk, shrunk_max_start);
+        // Offset 12 > 11; we clamp to tail (no content beyond max_start).
+        assert!(state3.is_at_tail());
+        assert_eq!(top_shrunk, shrunk_max_start);
+    }
+
+    /// `scrolled_by` from a stale offset: pressing Up should still move
+    /// the user up, not lock them at the bottom. The flat-offset model
+    /// makes this trivial — the offset is simply clamped to `max_start`
+    /// before applying the delta.
+    #[test]
+    fn scrolled_by_does_not_teleport_on_stale_offset() {
+        let meta = synth_line_meta(3, 2); // 8 entries
         let visible = 4;
-        let stale_anchor = TranscriptScroll::Scrolled {
-            cell_index: 4,
-            line_in_cell: 0,
-        };
-        // User presses Up (negative delta) from a stale anchor.
-        let new_state = stale_anchor.scrolled_by(-1, &meta, visible);
-        // Either ends up Scrolled near the top of the surviving content
-        // or ToBottom if the transcript fits in one screen — but the
-        // failure mode we're testing for is "ToBottom even though Up was
-        // pressed and there's room to scroll," which depends on
-        // total_lines > visible_lines.
+        let max_start = meta.len().saturating_sub(visible);
+        // User had scrolled past the new end of transcript.
+        let stale = TranscriptScroll::at_line(20);
+        let new_state = stale.scrolled_by(-1, &meta, visible);
+        // Either ends up Scrolled near the bottom (max_start - 1) or
+        // already at tail if max_start was 0.
         if meta.len() > visible {
-            assert!(matches!(new_state, TranscriptScroll::Scrolled { .. }));
+            // Should be at max_start - 1 = 3.
+            assert_eq!(new_state, TranscriptScroll::at_line(max_start - 1));
         }
     }
 
-    /// When the transcript fits entirely in the viewport, the scroll
-    /// state collapses to ToBottom regardless of where the anchor was.
+    /// When the transcript fits entirely in the viewport, scrolled_by
+    /// always collapses to tail.
     #[test]
     fn scrolled_by_collapses_to_bottom_when_view_fits() {
         let meta = synth_line_meta(2, 2);
         let visible = meta.len() + 5;
-        let anchor = TranscriptScroll::Scrolled {
-            cell_index: 0,
-            line_in_cell: 0,
-        };
-        let new_state = anchor.scrolled_by(-1, &meta, visible);
-        assert_eq!(new_state, TranscriptScroll::ToBottom);
+        let state = TranscriptScroll::at_line(0);
+        let new_state = state.scrolled_by(-1, &meta, visible);
+        assert!(new_state.is_at_tail());
     }
 
-    /// `nearest_cell_at_or_before` returns the highest cell_index that
-    /// is still ≤ the requested target.
+    /// `scrolled_by` from tail with positive delta stays at tail (we
+    /// can't scroll past the bottom).
     #[test]
-    fn nearest_cell_at_or_before_picks_highest_surviving() {
-        let meta = synth_line_meta(4, 1); // cells 0..4, one line each + spacers
-        let result = nearest_cell_at_or_before(&meta, 10);
-        let (cell_index, line_in_cell, _) = result.expect("a cell should match");
-        assert_eq!(cell_index, 3);
-        assert_eq!(line_in_cell, 0);
+    fn scrolled_by_from_tail_down_stays_at_tail() {
+        let meta = synth_line_meta(5, 3);
+        let visible = 6;
+        let state = TranscriptScroll::to_bottom();
+        let new_state = state.scrolled_by(5, &meta, visible);
+        assert!(new_state.is_at_tail());
     }
 
-    /// And falls back to the very first surviving cell when target is
-    /// below all surviving cells (shouldn't happen in practice but the
-    /// helper guards against it).
+    /// `scrolled_by` from tail with negative delta moves up by |delta|
+    /// from `max_start`.
     #[test]
-    fn nearest_cell_at_or_before_falls_back_to_first_when_target_too_low() {
-        let mut meta = synth_line_meta(0, 0);
-        meta.push(cell_line(5, 0));
-        meta.push(cell_line(6, 0));
-        let result = nearest_cell_at_or_before(&meta, 2);
-        let (cell_index, _, _) = result.expect("falls back to first cell");
-        assert_eq!(cell_index, 5);
+    fn scrolled_by_from_tail_up_walks_back_from_max_start() {
+        let meta = synth_line_meta(5, 3); // 19 entries
+        let visible = 6;
+        let max_start = meta.len().saturating_sub(visible);
+        let state = TranscriptScroll::to_bottom();
+        let new_state = state.scrolled_by(-3, &meta, visible);
+        assert_eq!(new_state, TranscriptScroll::at_line(max_start - 3));
     }
 
-    /// Empty line_meta returns None — caller falls through to ToBottom.
+    /// `anchor_for` clamps the requested start into the meta range and
+    /// produces a pinned state.
     #[test]
-    fn nearest_cell_at_or_before_empty_returns_none() {
+    fn anchor_for_clamps_start_into_range() {
+        let meta = synth_line_meta(4, 1);
+        let anchor = TranscriptScroll::anchor_for(&meta, 0).expect("non-empty");
+        assert_eq!(anchor, TranscriptScroll::at_line(0));
+
+        let anchor = TranscriptScroll::anchor_for(&meta, 1_000_000).expect("non-empty");
+        assert_eq!(
+            anchor,
+            TranscriptScroll::at_line(meta.len().saturating_sub(1))
+        );
+    }
+
+    /// Empty `line_meta` returns `None` so callers can fall back to
+    /// [`TranscriptScroll::to_bottom`].
+    #[test]
+    fn anchor_for_empty_returns_none() {
         let meta: Vec<TranscriptLineMeta> = Vec::new();
-        assert!(nearest_cell_at_or_before(&meta, 0).is_none());
+        assert!(TranscriptScroll::anchor_for(&meta, 0).is_none());
     }
 
+    /// Tail state resolves to `max_start` regardless of the `line_meta`
+    /// contents.
     #[test]
-    fn to_bottom_anchor_resolves_to_max_start() {
+    fn to_bottom_resolves_to_max_start() {
         let meta = synth_line_meta(5, 2);
         let max_start = 7;
-        let (state, top) = TranscriptScroll::ToBottom.resolve_top(&meta, max_start);
-        assert_eq!(state, TranscriptScroll::ToBottom);
+        let (state, top) = TranscriptScroll::to_bottom().resolve_top(&meta, max_start);
+        assert!(state.is_at_tail());
         assert_eq!(top, max_start);
     }
 }

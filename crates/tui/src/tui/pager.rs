@@ -1,6 +1,20 @@
 //! Full-screen pager overlay for long outputs.
+//!
+//! Vim-style key bindings (mirroring the codex pager_overlay):
+//! - `j` / Down — scroll down one line
+//! - `k` / Up — scroll up one line
+//! - `g g` / Home — jump to top
+//! - `G` / End — jump to bottom
+//! - `Ctrl+D` — half-page down
+//! - `Ctrl+U` — half-page up
+//! - `Ctrl+F` / PageDown / Space — full page down
+//! - `Ctrl+B` / PageUp / Shift+Space — full page up
+//! - `/` — start search; `n` / `N` — next / previous match
+//! - `q` / Esc — close pager
 
-use crossterm::event::{KeyCode, KeyEvent};
+use std::cell::Cell;
+
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
@@ -13,6 +27,11 @@ use unicode_width::UnicodeWidthStr;
 use crate::palette;
 use crate::tui::views::{ModalKind, ModalView, ViewAction};
 
+/// Footer hint shown along the bottom border of the pager. Kept short so it
+/// fits on narrow terminals; full reference lives in the module docs.
+const FOOTER_HINT: &str =
+    " j/k scroll  Space/b page  Ctrl+D/U half  g/G top/bottom  / search  q quit ";
+
 pub struct PagerView {
     title: String,
     lines: Vec<Line<'static>>,
@@ -23,6 +42,10 @@ pub struct PagerView {
     search_index: usize,
     search_mode: bool,
     pending_g: bool,
+    /// Cached visible content height from the last render. Used by paging
+    /// keys (Ctrl+D/U, Ctrl+F/B, Space, etc.) to compute scroll deltas
+    /// without access to the render area.
+    last_visible_height: Cell<usize>,
 }
 
 impl PagerView {
@@ -38,6 +61,7 @@ impl PagerView {
             search_index: 0,
             search_mode: false,
             pending_g: false,
+            last_visible_height: Cell::new(0),
         }
     }
 
@@ -68,6 +92,30 @@ impl PagerView {
 
     fn scroll_to_bottom(&mut self, max_scroll: usize) {
         self.scroll = max_scroll;
+    }
+
+    /// Return the page height (in lines) used for paging keys.
+    ///
+    /// Falls back to a small constant (10) before the first render so the
+    /// pager still responds to paging keys when invoked synthetically (e.g.
+    /// in unit tests). After the first render, the cached value reflects
+    /// the actual visible content area.
+    fn page_height(&self) -> usize {
+        let cached = self.last_visible_height.get();
+        if cached == 0 { 10 } else { cached }
+    }
+
+    /// Half a page, rounded up so a single press always moves at least one line.
+    fn half_page_height(&self) -> usize {
+        let page = self.page_height();
+        page.div_ceil(2).max(1)
+    }
+
+    fn max_scroll(&self) -> usize {
+        // Match the existing 1-line scroll convention used by `j`/`k`. Render
+        // clamps `self.scroll` to `lines.len() - visible_height` for display
+        // purposes, so over-scrolling here is harmless.
+        self.lines.len().saturating_sub(1)
     }
 
     fn start_search(&mut self) {
@@ -157,6 +205,38 @@ impl ModalView for PagerView {
             }
         }
 
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+        let max_scroll = self.max_scroll();
+
+        // Ctrl+chord paging keys are matched first because their KeyCode
+        // also matches the bare `KeyCode::Char(c)` arms below.
+        if ctrl {
+            match key.code {
+                KeyCode::Char('d') | KeyCode::Char('D') => {
+                    self.scroll_down(self.half_page_height(), max_scroll);
+                    self.pending_g = false;
+                    return ViewAction::None;
+                }
+                KeyCode::Char('u') | KeyCode::Char('U') => {
+                    self.scroll_up(self.half_page_height());
+                    self.pending_g = false;
+                    return ViewAction::None;
+                }
+                KeyCode::Char('f') | KeyCode::Char('F') => {
+                    self.scroll_down(self.page_height(), max_scroll);
+                    self.pending_g = false;
+                    return ViewAction::None;
+                }
+                KeyCode::Char('b') | KeyCode::Char('B') => {
+                    self.scroll_up(self.page_height());
+                    self.pending_g = false;
+                    return ViewAction::None;
+                }
+                _ => {}
+            }
+        }
+
         match key.code {
             KeyCode::Esc | KeyCode::Char('q') => ViewAction::Close,
             KeyCode::Up | KeyCode::Char('k') => {
@@ -165,17 +245,39 @@ impl ModalView for PagerView {
                 ViewAction::None
             }
             KeyCode::Down | KeyCode::Char('j') => {
-                self.scroll_down(1, self.lines.len().saturating_sub(1));
+                self.scroll_down(1, max_scroll);
                 self.pending_g = false;
                 ViewAction::None
             }
             KeyCode::PageUp => {
-                self.scroll_up(10);
+                self.scroll_up(self.page_height());
                 self.pending_g = false;
                 ViewAction::None
             }
             KeyCode::PageDown => {
-                self.scroll_down(10, self.lines.len().saturating_sub(1));
+                self.scroll_down(self.page_height(), max_scroll);
+                self.pending_g = false;
+                ViewAction::None
+            }
+            // Vim convention: Space pages down, Shift+Space pages up. Match
+            // Shift+Space first so it is not absorbed by the bare ' ' arm.
+            KeyCode::Char(' ') if shift => {
+                self.scroll_up(self.page_height());
+                self.pending_g = false;
+                ViewAction::None
+            }
+            KeyCode::Char(' ') => {
+                self.scroll_down(self.page_height(), max_scroll);
+                self.pending_g = false;
+                ViewAction::None
+            }
+            KeyCode::Home => {
+                self.scroll_to_top();
+                self.pending_g = false;
+                ViewAction::None
+            }
+            KeyCode::End => {
+                self.scroll_to_bottom(max_scroll);
                 self.pending_g = false;
                 ViewAction::None
             }
@@ -189,7 +291,7 @@ impl ModalView for PagerView {
                 ViewAction::None
             }
             KeyCode::Char('G') => {
-                self.scroll_to_bottom(self.lines.len().saturating_sub(1));
+                self.scroll_to_bottom(max_scroll);
                 self.pending_g = false;
                 ViewAction::None
             }
@@ -228,6 +330,9 @@ impl ModalView for PagerView {
         if self.search_mode {
             visible_height = visible_height.saturating_sub(1);
         }
+        // Cache for paging keys; the value is treated as advisory and
+        // clamped at use-time.
+        self.last_visible_height.set(visible_height);
         let max_scroll = self.lines.len().saturating_sub(visible_height);
         let scroll = self.scroll.min(max_scroll);
         let end = (scroll + visible_height).min(self.lines.len());
@@ -257,8 +362,13 @@ impl ModalView for PagerView {
             )));
         }
 
+        let footer = Line::from(Span::styled(
+            FOOTER_HINT,
+            Style::default().fg(palette::TEXT_HINT),
+        ));
         let block = Block::default()
             .title(self.title.clone())
+            .title_bottom(footer)
             .borders(Borders::ALL)
             .border_style(Style::default().fg(palette::BORDER_COLOR))
             .style(Style::default().bg(palette::DEEPSEEK_INK))
@@ -314,4 +424,212 @@ fn wrap_text(text: &str, width: usize) -> Vec<String> {
     }
 
     lines
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::text::Line;
+
+    fn make_pager(lines: usize) -> PagerView {
+        let lines: Vec<Line<'static>> = (0..lines)
+            .map(|i| Line::from(format!("line-{i:03}")))
+            .collect();
+        PagerView::new("T", lines)
+    }
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    fn key_mod(code: KeyCode, mods: KeyModifiers) -> KeyEvent {
+        KeyEvent::new(code, mods)
+    }
+
+    fn ctrl(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::CONTROL)
+    }
+
+    /// Drive a render once so `last_visible_height` is populated and paging
+    /// keys use a deterministic page size.
+    fn prime_layout(view: &mut PagerView, height: u16) {
+        let area = Rect::new(0, 0, 40, height);
+        let mut buf = Buffer::empty(area);
+        view.render(area, &mut buf);
+    }
+
+    #[test]
+    fn j_scrolls_down_one_line() {
+        let mut p = make_pager(50);
+        let _ = p.handle_key(key(KeyCode::Char('j')));
+        assert_eq!(p.scroll, 1);
+    }
+
+    #[test]
+    fn k_scrolls_up_one_line() {
+        let mut p = make_pager(50);
+        p.scroll = 5;
+        let _ = p.handle_key(key(KeyCode::Char('k')));
+        assert_eq!(p.scroll, 4);
+    }
+
+    #[test]
+    fn gg_jumps_to_top() {
+        let mut p = make_pager(50);
+        p.scroll = 30;
+        let _ = p.handle_key(key(KeyCode::Char('g')));
+        assert!(p.pending_g, "first 'g' should arm pending_g");
+        assert_eq!(p.scroll, 30, "first 'g' alone must not scroll");
+        let _ = p.handle_key(key(KeyCode::Char('g')));
+        assert_eq!(p.scroll, 0);
+        assert!(!p.pending_g);
+    }
+
+    #[test]
+    fn home_jumps_to_top() {
+        let mut p = make_pager(50);
+        p.scroll = 30;
+        let _ = p.handle_key(key(KeyCode::Home));
+        assert_eq!(p.scroll, 0);
+    }
+
+    #[test]
+    fn shift_g_jumps_to_bottom() {
+        let mut p = make_pager(50);
+        let _ = p.handle_key(key(KeyCode::Char('G')));
+        assert_eq!(p.scroll, p.max_scroll());
+    }
+
+    #[test]
+    fn end_jumps_to_bottom() {
+        let mut p = make_pager(50);
+        let _ = p.handle_key(key(KeyCode::End));
+        assert_eq!(p.scroll, p.max_scroll());
+    }
+
+    #[test]
+    fn ctrl_d_half_page_down() {
+        let mut p = make_pager(200);
+        prime_layout(&mut p, 22);
+        let half = p.half_page_height();
+        assert!(half >= 1, "half-page must move at least one line");
+        let _ = p.handle_key(ctrl(KeyCode::Char('d')));
+        assert_eq!(p.scroll, half);
+    }
+
+    #[test]
+    fn ctrl_u_half_page_up() {
+        let mut p = make_pager(200);
+        prime_layout(&mut p, 22);
+        p.scroll = 50;
+        let half = p.half_page_height();
+        let _ = p.handle_key(ctrl(KeyCode::Char('u')));
+        assert_eq!(p.scroll, 50 - half);
+    }
+
+    #[test]
+    fn ctrl_f_full_page_down() {
+        let mut p = make_pager(200);
+        prime_layout(&mut p, 22);
+        let page = p.page_height();
+        let _ = p.handle_key(ctrl(KeyCode::Char('f')));
+        assert_eq!(p.scroll, page);
+    }
+
+    #[test]
+    fn ctrl_b_full_page_up() {
+        let mut p = make_pager(200);
+        prime_layout(&mut p, 22);
+        p.scroll = 80;
+        let page = p.page_height();
+        let _ = p.handle_key(ctrl(KeyCode::Char('b')));
+        assert_eq!(p.scroll, 80 - page);
+    }
+
+    #[test]
+    fn space_pages_down() {
+        let mut p = make_pager(200);
+        prime_layout(&mut p, 22);
+        let page = p.page_height();
+        let _ = p.handle_key(key(KeyCode::Char(' ')));
+        assert_eq!(p.scroll, page);
+    }
+
+    #[test]
+    fn shift_space_pages_up() {
+        let mut p = make_pager(200);
+        prime_layout(&mut p, 22);
+        p.scroll = 80;
+        let page = p.page_height();
+        let _ = p.handle_key(key_mod(KeyCode::Char(' '), KeyModifiers::SHIFT));
+        assert_eq!(p.scroll, 80 - page);
+    }
+
+    #[test]
+    fn page_down_uses_cached_visible_height() {
+        let mut p = make_pager(200);
+        prime_layout(&mut p, 22);
+        let page = p.page_height();
+        let _ = p.handle_key(key(KeyCode::PageDown));
+        assert_eq!(p.scroll, page);
+    }
+
+    #[test]
+    fn q_closes_pager() {
+        let mut p = make_pager(10);
+        let action = p.handle_key(key(KeyCode::Char('q')));
+        assert!(matches!(action, ViewAction::Close));
+    }
+
+    #[test]
+    fn esc_closes_pager() {
+        let mut p = make_pager(10);
+        let action = p.handle_key(key(KeyCode::Esc));
+        assert!(matches!(action, ViewAction::Close));
+    }
+
+    #[test]
+    fn g_does_not_consume_search_input() {
+        // While in search mode, 'g' must be treated as a search character,
+        // not as the half of a `gg` jump-to-top sequence.
+        let mut p = make_pager(50);
+        p.scroll = 10;
+        let _ = p.handle_key(key(KeyCode::Char('/')));
+        assert!(p.search_mode);
+        let _ = p.handle_key(key(KeyCode::Char('g')));
+        assert_eq!(p.search_input, "g");
+        assert_eq!(p.scroll, 10);
+    }
+
+    #[test]
+    fn footer_hint_includes_new_bindings() {
+        // The rendered pager must surface the new vim-style bindings to
+        // the user; check the footer string covers the headline keys.
+        for needle in &["j/k", "g/G", "Space", "Ctrl+D", "/ search", "q quit"] {
+            assert!(
+                FOOTER_HINT.contains(needle),
+                "footer hint missing {needle:?}: {FOOTER_HINT}"
+            );
+        }
+    }
+
+    #[test]
+    fn footer_hint_is_rendered_in_buffer() {
+        let p = make_pager(5);
+        let area = Rect::new(0, 0, 100, 10);
+        let mut buf = Buffer::empty(area);
+        p.render(area, &mut buf);
+        // The pager renders into an inset popup_area = (1, 1, w-2, h-2),
+        // so the bottom border lives at y = popup_area.bottom() - 1, not
+        // at the outer area's last row.
+        let popup_bottom_y = (area.height as usize).saturating_sub(2);
+        let mut bottom = String::new();
+        for x in 1..area.right().saturating_sub(1) {
+            bottom.push_str(buf[(x, popup_bottom_y as u16)].symbol());
+        }
+        assert!(
+            bottom.contains("j/k") || bottom.contains("scroll"),
+            "expected footer hint on bottom border row {popup_bottom_y}, got: {bottom:?}"
+        );
+    }
 }

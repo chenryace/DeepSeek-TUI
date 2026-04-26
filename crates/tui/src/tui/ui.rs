@@ -521,6 +521,10 @@ async fn run_event_loop(
                         app.offline_mode = false;
                         app.streaming_state.reset();
                         app.turn_started_at = None;
+                        // Stream lock applies per-turn; clear it so the next
+                        // turn's chunks pull the view down again until the
+                        // user opts out by scrolling up.
+                        app.user_scrolled_during_stream = false;
                         app.runtime_turn_status = Some(match status {
                             crate::core::events::TurnOutcomeStatus::Completed => {
                                 "completed".to_string()
@@ -1058,6 +1062,13 @@ async fn run_event_loop(
             }
 
             if key.code == KeyCode::Char('k') && key.modifiers.contains(KeyModifiers::CONTROL) {
+                // When the composer is the active input target (no modal/pager
+                // intercepting keys), Ctrl+K performs an emacs-style kill to
+                // end-of-line. If the kill is a no-op (cursor at end of empty
+                // input), fall through to the existing command palette.
+                if app.view_stack.is_empty() && app.kill_to_end_of_line() {
+                    continue;
+                }
                 app.view_stack
                     .push(CommandPaletteView::new(build_command_palette_entries(
                         &app.skills_dir,
@@ -1122,6 +1133,11 @@ async fn run_event_loop(
                     if key.modifiers.is_empty()
                         && app.input.is_empty()
                         && open_tool_details_pager(app) =>
+                {
+                    continue;
+                }
+                KeyCode::Char('o')
+                    if key.modifiers == KeyModifiers::CONTROL && open_thinking_pager(app) =>
                 {
                     continue;
                 }
@@ -1400,6 +1416,11 @@ async fn run_event_loop(
                 }
                 KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                     app.clear_input();
+                }
+                KeyCode::Char('y') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    // Emacs-style yank from the kill buffer at the cursor.
+                    // No-op when the buffer is empty.
+                    app.yank();
                 }
                 KeyCode::Char('x') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                     let new_mode = match app.mode {
@@ -3929,7 +3950,7 @@ fn handle_mouse_event(app: &mut App, mouse: MouseEvent) {
                 app.transcript_selection.dragging = true;
 
                 if app.is_loading
-                    && matches!(app.transcript_scroll, TranscriptScroll::ToBottom)
+                    && app.transcript_scroll.is_at_tail()
                     && let Some(anchor) = TranscriptScroll::anchor_for(
                         app.transcript_cache.line_meta(),
                         app.last_transcript_top,
@@ -4080,6 +4101,61 @@ fn open_pager_for_last_message(app: &mut App) -> bool {
     let text = history_cell_to_text(cell, width);
     let pager = PagerView::from_text("Message", &text, width.saturating_sub(2));
     app.view_stack.push(pager);
+    true
+}
+
+/// Open a pager showing the full thinking block. Targets the cell at the
+/// current selection if it's a Thinking cell; otherwise falls back to the
+/// most recent Thinking cell in history. Bound to Ctrl+O so users can read
+/// reasoning content that's been collapsed in calm-mode rendering.
+fn open_thinking_pager(app: &mut App) -> bool {
+    let selected_cell = app
+        .transcript_selection
+        .ordered_endpoints()
+        .and_then(|(start, _)| {
+            app.transcript_cache
+                .line_meta()
+                .get(start.line_index)
+                .and_then(|meta| meta.cell_line())
+                .map(|(cell_index, _)| cell_index)
+        })
+        .filter(|&idx| {
+            matches!(
+                app.history.get(idx),
+                Some(crate::tui::history::HistoryCell::Thinking { .. })
+            )
+        });
+
+    let target_idx = selected_cell.or_else(|| {
+        app.history
+            .iter()
+            .enumerate()
+            .rev()
+            .find_map(|(idx, cell)| {
+                if matches!(cell, crate::tui::history::HistoryCell::Thinking { .. }) {
+                    Some(idx)
+                } else {
+                    None
+                }
+            })
+    });
+
+    let Some(idx) = target_idx else {
+        app.status_message = Some("No thinking blocks to expand".to_string());
+        return true;
+    };
+
+    let cell = &app.history[idx];
+    let width = app
+        .last_transcript_area
+        .map(|area| area.width)
+        .unwrap_or(80);
+    let text = history_cell_to_text(cell, width);
+    app.view_stack.push(PagerView::from_text(
+        "Thinking",
+        &text,
+        width.saturating_sub(2),
+    ));
     true
 }
 

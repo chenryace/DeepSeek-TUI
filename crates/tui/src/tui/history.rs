@@ -1188,7 +1188,7 @@ fn render_thinking(
         lines.push(Line::from(vec![
             Span::styled("▏ ", Style::default().fg(thinking_state_accent(state))),
             Span::styled(
-                "thinking collapsed; press v for full text",
+                "thinking collapsed; press Ctrl+O for full text",
                 Style::default().fg(palette::TEXT_MUTED).italic(),
             ),
         ]));
@@ -1657,7 +1657,7 @@ mod tests {
             .iter()
             .flat_map(|line| line.spans.iter().map(|span| span.content.as_ref()))
             .collect::<String>();
-        assert!(text.contains("thinking collapsed; press v for full text"));
+        assert!(text.contains("thinking collapsed; press Ctrl+O for full text"));
         assert!(text.contains("thinking"));
     }
 

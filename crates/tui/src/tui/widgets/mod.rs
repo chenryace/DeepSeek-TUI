@@ -10,7 +10,7 @@ use crate::palette;
 use crate::tui::app::{App, AppMode, ComposerDensity};
 use crate::tui::approval::{ApprovalRequest, ElevationOption, ElevationRequest, ToolCategory};
 use crate::tui::history::HistoryCell;
-use crate::tui::scrolling::{TranscriptLineMeta, TranscriptScroll};
+use crate::tui::scrolling::TranscriptLineMeta;
 use crate::{commands, config::COMMON_DEEPSEEK_MODELS};
 use ratatui::{
     buffer::Buffer,
@@ -62,10 +62,16 @@ impl ChatWidget {
             };
         }
 
+        // The transcript cache exposes a per-cell revision slice for fine
+        // grained caching; until App tracks per-cell revisions explicitly,
+        // we synthesize a uniform slice from the global history_version so
+        // any mutation invalidates every cell (matches the pre-cache
+        // semantics).
+        let cell_revisions = vec![app.history_version; app.history.len()];
         app.transcript_cache.ensure(
             &app.history,
+            &cell_revisions,
             content_area.width.max(1),
-            app.history_version,
             render_options,
         );
 
@@ -85,6 +91,14 @@ impl ChatWidget {
         let max_start = total_lines.saturating_sub(visible_lines);
         let (scroll_state, top) = app.transcript_scroll.resolve_top(line_meta, max_start);
         app.transcript_scroll = scroll_state;
+        // If the user scrolled back to the live tail, the per-stream
+        // "leave me alone" lock is over — new chunks should pin to bottom
+        // again until they explicitly scroll up. Without this clear, content
+        // piles up off-screen below the visible area and the view appears
+        // frozen at the moment they returned to bottom.
+        if app.transcript_scroll.is_at_tail() {
+            app.user_scrolled_during_stream = false;
+        }
 
         app.last_transcript_area = Some(content_area);
         app.last_transcript_top = top;
@@ -112,7 +126,7 @@ impl ChatWidget {
 
         apply_selection(&mut lines, top, app);
 
-        if matches!(app.transcript_scroll, TranscriptScroll::ToBottom) {
+        if app.transcript_scroll.is_at_tail() {
             app.last_transcript_padding_top = visible_lines.saturating_sub(lines.len());
             pad_lines_to_bottom(&mut lines, visible_lines);
         }

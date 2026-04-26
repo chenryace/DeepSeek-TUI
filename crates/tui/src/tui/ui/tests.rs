@@ -909,10 +909,11 @@ fn jump_to_adjacent_tool_cell_finds_next_and_previous() {
         })),
     ];
     app.mark_history_updated();
+    let cell_revisions = vec![app.history_version; app.history.len()];
     app.transcript_cache.ensure(
         &app.history,
+        &cell_revisions,
         100,
-        app.history_version,
         app.transcript_render_options(),
     );
 
@@ -921,10 +922,11 @@ fn jump_to_adjacent_tool_cell_finds_next_and_previous() {
         &mut app,
         SearchDirection::Forward
     ));
-    assert!(matches!(
-        app.transcript_scroll,
-        TranscriptScroll::Scrolled { .. }
-    ));
+    // Forward jump pins the scroll to a non-tail line offset (the tool
+    // cell's first line). Anything below the live tail is acceptable —
+    // the previous assertion checked `TranscriptScroll::Scrolled { .. }`,
+    // which under the new flat-offset model means "not at tail."
+    assert!(!app.transcript_scroll.is_at_tail());
 
     app.last_transcript_top = app.transcript_cache.total_lines().saturating_sub(1);
     assert!(jump_to_adjacent_tool_cell(

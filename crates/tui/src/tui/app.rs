@@ -355,6 +355,10 @@ pub struct App {
     pub mode: AppMode,
     pub input: String,
     pub cursor_position: usize,
+    /// Single-entry kill buffer for emacs-style `Ctrl+K` cut / `Ctrl+Y` yank.
+    /// Populated by `kill_to_end_of_line`; restored by `yank`. Persists across
+    /// composer clears (e.g. submit) so a yank can recover an accidental kill.
+    pub kill_buffer: String,
     pub paste_burst: PasteBurst,
     pub history: Vec<HistoryCell>,
     pub history_version: u64,
@@ -522,6 +526,10 @@ pub struct App {
     pub thinking_started_at: Option<Instant>,
     /// Whether context compaction is currently in progress.
     pub is_compacting: bool,
+    /// Set when the user scrolls up/down during a streaming turn so subsequent
+    /// streamed chunks don't yank the view back to the live tail. Cleared
+    /// when the user explicitly returns to bottom or the turn completes.
+    pub user_scrolled_during_stream: bool,
     /// Plain-language session coherence state for the footer.
     pub coherence_state: CoherenceState,
     /// Timestamp of the last user message send (for brief visual feedback).
@@ -672,11 +680,12 @@ impl App {
             mode: initial_mode,
             input: String::new(),
             cursor_position: 0,
+            kill_buffer: String::new(),
             paste_burst: PasteBurst::default(),
             history: Vec::new(),
             history_version: 0,
             api_messages: Vec::new(),
-            transcript_scroll: TranscriptScroll::ToBottom,
+            transcript_scroll: TranscriptScroll::to_bottom(),
             pending_scroll_delta: 0,
             mouse_scroll: MouseScrollState::new(),
             transcript_cache: TranscriptViewCache::new(),
@@ -789,6 +798,7 @@ impl App {
             needs_redraw: true,
             thinking_started_at: None,
             is_compacting: false,
+            user_scrolled_during_stream: false,
             coherence_state: CoherenceState::default(),
             last_send_at: None,
         }
@@ -917,9 +927,18 @@ impl App {
             .transcript_selection
             .ordered_endpoints()
             .is_some_and(|(start, end)| start != end);
-        if matches!(self.transcript_scroll, TranscriptScroll::ToBottom)
+        // Auto-pin to live tail only when:
+        //   1. We're already at the tail (nothing to do otherwise)
+        //   2. The user isn't actively selecting text
+        //   3. The user hasn't scrolled away during this streaming turn
+        // Without (3), pressing Up while a tool result streams in would lose
+        // the keypress: scroll_up sets pending_scroll_delta, but before the
+        // render frame consumes it, mark_history_updated would fire here,
+        // call scroll_to_bottom, and zero the delta.
+        if self.transcript_scroll.is_at_tail()
             && !self.transcript_selection.dragging
             && !selection_has_range
+            && !self.user_scrolled_during_stream
         {
             self.scroll_to_bottom();
         }
@@ -1079,17 +1098,15 @@ impl App {
         // Invalidate transcript cache (will be rebuilt on next render)
         self.transcript_cache = TranscriptViewCache::new();
 
-        // Preserve cell-level anchor through resize: line_in_cell depends
-        // on the old width so reset it to 0 (start of the same cell).
-        // ToBottom stays ToBottom; SpacerBeforeCell keeps its cell_index.
-        match self.transcript_scroll {
-            TranscriptScroll::Scrolled { cell_index, .. } => {
-                self.transcript_scroll = TranscriptScroll::Scrolled {
-                    cell_index,
-                    line_in_cell: 0,
-                };
-            }
-            TranscriptScroll::ToBottom | TranscriptScroll::ScrolledSpacerBeforeCell { .. } => {}
+        // The flat line-offset model is width-dependent (line wrapping
+        // changes the meta length on resize), so a stored offset can no
+        // longer point at the same logical content. Snapping back to the
+        // tail keeps the user where they intuitively expect — at the
+        // most recent output — and matches what Codex does on resize.
+        // The renderer will clamp anyway, but resetting to tail avoids
+        // a frame where the offset shows stale wrapping.
+        if !self.transcript_scroll.is_at_tail() {
+            self.transcript_scroll = TranscriptScroll::to_bottom();
         }
 
         // Clear pending scroll delta
@@ -1227,18 +1244,26 @@ impl App {
     pub fn scroll_up(&mut self, amount: usize) {
         let delta = i32::try_from(amount).unwrap_or(i32::MAX);
         self.pending_scroll_delta = self.pending_scroll_delta.saturating_sub(delta);
+        // Sticky intent: once the user has scrolled up during a stream, they
+        // shouldn't be yanked back to the live tail by subsequent chunks.
+        // Cleared when they explicitly return to bottom or the stream ends.
+        self.user_scrolled_during_stream = true;
         self.needs_redraw = true;
     }
 
     pub fn scroll_down(&mut self, amount: usize) {
         let delta = i32::try_from(amount).unwrap_or(i32::MAX);
         self.pending_scroll_delta = self.pending_scroll_delta.saturating_add(delta);
+        self.user_scrolled_during_stream = true;
         self.needs_redraw = true;
     }
 
     pub fn scroll_to_bottom(&mut self) {
-        self.transcript_scroll = TranscriptScroll::ToBottom;
+        self.transcript_scroll = TranscriptScroll::to_bottom();
         self.pending_scroll_delta = 0;
+        // Explicit return-to-tail clears the stream-lock; new chunks will
+        // again pull the view down with them.
+        self.user_scrolled_during_stream = false;
         self.needs_redraw = true;
     }
 
@@ -1275,6 +1300,66 @@ impl App {
         }
         self.slash_menu_hidden = false;
         self.needs_redraw = true;
+    }
+
+    /// Cut from the cursor to the end of the current logical line into the
+    /// kill buffer. If the cursor is already at end-of-line and a trailing
+    /// newline exists, that newline is consumed so repeated invocations
+    /// continue to make progress (matching emacs/codex semantics).
+    ///
+    /// Returns `true` when bytes were moved into the kill buffer.
+    pub fn kill_to_end_of_line(&mut self) -> bool {
+        let total_chars = char_count(&self.input);
+        let cursor = self.cursor_position.min(total_chars);
+        let start_byte = byte_index_at_char(&self.input, cursor);
+
+        // Find the byte offset of the next '\n' (relative to the whole string)
+        // or the end of the buffer if no newline exists at/after the cursor.
+        let eol_byte = self.input[start_byte..]
+            .find('\n')
+            .map(|rel| start_byte + rel)
+            .unwrap_or_else(|| self.input.len());
+
+        let end_byte = if start_byte == eol_byte {
+            // Cursor is at EOL — consume the newline itself if one is there.
+            if eol_byte < self.input.len() {
+                eol_byte + 1
+            } else {
+                return false;
+            }
+        } else {
+            eol_byte
+        };
+
+        let removed: String = self.input[start_byte..end_byte].to_string();
+        if removed.is_empty() {
+            return false;
+        }
+
+        self.kill_buffer = removed;
+        self.input.replace_range(start_byte..end_byte, "");
+        // Cursor stays at the same character index (start of removed range).
+        self.cursor_position = cursor;
+        self.slash_menu_hidden = false;
+        self.needs_redraw = true;
+        true
+    }
+
+    /// Insert the contents of the kill buffer at the cursor, advancing it.
+    /// The kill buffer is left intact so multiple yanks duplicate the text.
+    /// Returns `true` if any text was inserted.
+    pub fn yank(&mut self) -> bool {
+        if self.kill_buffer.is_empty() {
+            return false;
+        }
+        let text = self.kill_buffer.clone();
+        let cursor = self.cursor_position.min(char_count(&self.input));
+        let byte_index = byte_index_at_char(&self.input, cursor);
+        self.input.insert_str(byte_index, &text);
+        self.cursor_position = cursor + char_count(&text);
+        self.slash_menu_hidden = false;
+        self.needs_redraw = true;
+        true
     }
 
     pub fn move_cursor_left(&mut self) {
@@ -1740,5 +1825,73 @@ mod tests {
 
         // Navigate down
         app.history_down();
+    }
+
+    #[test]
+    fn kill_to_end_of_line_cuts_from_middle_of_word() {
+        let mut app = App::new(test_options(false), &Config::default());
+        app.input = "hello world".to_string();
+        app.cursor_position = 6; // before 'w'
+        assert!(app.kill_to_end_of_line());
+        assert_eq!(app.input, "hello ");
+        assert_eq!(app.cursor_position, 6);
+        assert_eq!(app.kill_buffer, "world");
+    }
+
+    #[test]
+    fn kill_at_eol_consumes_following_newline() {
+        let mut app = App::new(test_options(false), &Config::default());
+        app.input = "line one\nline two".to_string();
+        app.cursor_position = 8; // sitting on the '\n'
+        assert!(app.kill_to_end_of_line());
+        assert_eq!(app.input, "line oneline two");
+        assert_eq!(app.cursor_position, 8);
+        assert_eq!(app.kill_buffer, "\n");
+
+        // Empty input: kill is a no-op and the buffer is untouched.
+        let mut empty = App::new(test_options(false), &Config::default());
+        assert!(!empty.kill_to_end_of_line());
+        assert!(empty.input.is_empty());
+        assert!(empty.kill_buffer.is_empty());
+    }
+
+    #[test]
+    fn yank_inserts_kill_buffer_and_preserves_it() {
+        let mut app = App::new(test_options(false), &Config::default());
+        app.input = "abc def".to_string();
+        app.cursor_position = 4; // before 'd'
+        assert!(app.kill_to_end_of_line());
+        assert_eq!(app.input, "abc ");
+        assert_eq!(app.kill_buffer, "def");
+
+        // Move cursor to the start and yank twice — kill_buffer must persist.
+        app.cursor_position = 0;
+        assert!(app.yank());
+        assert!(app.yank());
+        assert_eq!(app.input, "defdefabc ");
+        assert_eq!(app.cursor_position, 6);
+        assert_eq!(app.kill_buffer, "def");
+
+        // Yank with empty buffer is a no-op.
+        let mut empty = App::new(test_options(false), &Config::default());
+        assert!(!empty.yank());
+        assert!(empty.input.is_empty());
+    }
+
+    #[test]
+    fn kill_and_yank_handle_multibyte_utf8() {
+        let mut app = App::new(test_options(false), &Config::default());
+        // "café 你好" — char_count = 7 (c,a,f,é, ,你,好); UTF-8 bytes differ.
+        app.input = "café 你好".to_string();
+        app.cursor_position = 5; // before '你'
+        assert!(app.kill_to_end_of_line());
+        assert_eq!(app.input, "café ");
+        assert_eq!(app.cursor_position, 5);
+        assert_eq!(app.kill_buffer, "你好");
+
+        // Yank back at the same spot — must not panic on char boundaries.
+        assert!(app.yank());
+        assert_eq!(app.input, "café 你好");
+        assert_eq!(app.cursor_position, 7);
     }
 }
