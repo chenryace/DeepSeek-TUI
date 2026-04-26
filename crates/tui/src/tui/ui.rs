@@ -3224,11 +3224,16 @@ fn render_footer(f: &mut Frame, area: Rect, app: &mut App) {
 }
 
 /// Whether the footer should animate the water-spout strip. Driven by the
-/// underlying live-work flags (model loading, compacting, sub-agents) rather
-/// than a stringly-typed status label, so adding or removing labels never
-/// silently disables the animation.
+/// underlying live-work flags so the strip stays visible for the *entire*
+/// turn — not just the moments where bytes are streaming. `is_loading` can
+/// flicker off between LLM rounds within a single turn (tool execution,
+/// reasoning replay, capacity refresh, etc.), so we ALSO gate on the turn
+/// itself still being in flight via `runtime_turn_status == "in_progress"`.
+/// Without that, the user sees the strip vanish for seconds at a time even
+/// though the agent is still working.
 fn footer_working_strip_active(app: &App) -> bool {
-    app.is_loading || app.is_compacting || running_agent_count(app) > 0
+    let turn_in_progress = app.runtime_turn_status.as_deref() == Some("in_progress");
+    app.is_loading || app.is_compacting || running_agent_count(app) > 0 || turn_in_progress
 }
 
 /// Test-only helper retained as a parity reference for `FooterWidget`'s

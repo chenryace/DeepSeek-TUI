@@ -2402,9 +2402,12 @@ async fn run_subagent(
             top_p: None,
         };
 
-        let response = tokio::time::timeout(STEP_API_TIMEOUT, runtime.client.create_message(request))
-            .await
-            .map_err(|_| anyhow!("API call timed out after {}s", STEP_API_TIMEOUT.as_secs()))??;
+        let response =
+            tokio::time::timeout(STEP_API_TIMEOUT, runtime.client.create_message(request))
+                .await
+                .map_err(|_| {
+                    anyhow!("API call timed out after {}s", STEP_API_TIMEOUT.as_secs())
+                })??;
 
         let mut tool_uses = Vec::new();
         for block in &response.content {
