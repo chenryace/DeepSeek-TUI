@@ -5069,19 +5069,21 @@ fn exploring_label(name: &str, input: &serde_json::Value) -> String {
         "read_file" => obj
             .and_then(|o| o.get("path"))
             .and_then(|v| v.as_str())
-            .map_or(fallback, |path| format!("Read {path}")),
+            .map_or(fallback, |path| format!("Reading {path}")),
         "list_dir" => obj
             .and_then(|o| o.get("path"))
             .and_then(|v| v.as_str())
-            .map_or("List directory".to_string(), |path| format!("List {path}")),
+            .map_or("Listing directory".to_string(), |path| {
+                format!("Listing {path}")
+            }),
         "grep_files" => {
             let pattern = obj
                 .and_then(|o| o.get("pattern"))
                 .and_then(|v| v.as_str())
                 .unwrap_or("pattern");
-            format!("Search {pattern}")
+            format!("Searching for `{pattern}`")
         }
-        "list_files" => "List files".to_string(),
+        "list_files" => "Listing files".to_string(),
         _ => fallback,
     }
 }

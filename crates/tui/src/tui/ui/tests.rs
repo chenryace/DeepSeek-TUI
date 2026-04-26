@@ -1356,3 +1356,46 @@ fn tool_details_survive_active_cell_flush() {
     assert_eq!(detail.tool_id, "tid");
     assert_eq!(detail.tool_name, "exec_shell");
 }
+
+// ---- exploring labels: codex-style progressive verbs ----
+//
+// Bare names like "Read foo.rs" / "Search pattern" read as past tense, which
+// is wrong while the tool is still running. Progressive forms ("Reading…",
+// "Searching for…") match what the user actually sees: a live in-flight
+// action.
+
+#[test]
+fn exploring_label_uses_progressive_for_read_file() {
+    let label = exploring_label("read_file", &serde_json::json!({"path": "src/foo.rs"}));
+    assert_eq!(label, "Reading src/foo.rs");
+}
+
+#[test]
+fn exploring_label_uses_progressive_for_list_dir() {
+    let label = exploring_label("list_dir", &serde_json::json!({"path": "crates/tui/src/"}));
+    assert_eq!(label, "Listing crates/tui/src/");
+}
+
+#[test]
+fn exploring_label_uses_progressive_for_list_dir_no_path() {
+    let label = exploring_label("list_dir", &serde_json::json!({}));
+    assert_eq!(label, "Listing directory");
+}
+
+#[test]
+fn exploring_label_for_grep_quotes_pattern_with_searching_for() {
+    let label = exploring_label(
+        "grep_files",
+        &serde_json::json!({"pattern": "TranscriptScroll"}),
+    );
+    assert_eq!(label, "Searching for `TranscriptScroll`");
+}
+
+#[test]
+fn exploring_label_for_list_files_uses_progressive() {
+    let label = exploring_label("list_files", &serde_json::json!({}));
+    assert_eq!(label, "Listing files");
+}
+
+// `running_status_label_with_elapsed` lives in `crate::tui::history` next to
+// the other tool-header helpers — its tests live there too.

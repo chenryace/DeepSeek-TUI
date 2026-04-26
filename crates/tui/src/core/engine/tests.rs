@@ -891,3 +891,48 @@ fn fake_wrapper_notice_is_compact_and_actionable() {
     assert!(FAKE_WRAPPER_NOTICE.len() < 120);
     assert!(FAKE_WRAPPER_NOTICE.contains("API tool channel"));
 }
+
+// ---- final_tool_input: bug-class regression for "<command>" placeholder ----
+//
+// Background: a streamed tool block carries its `input` in two pieces — an
+// initial value at `ContentBlockStart` (often `{}`), then `InputJsonDelta`
+// chunks that build up `input_buffer`. The TUI used to fire `ToolCallStarted`
+// from `ContentBlockStart` with the empty initial input and never re-emit
+// once args were known, so cells rendered the literal text `<command>` /
+// `<file>` placeholders. The fix relocates the emission to `ContentBlockStop`
+// and routes the input through `final_tool_input`, which prefers the parsed
+// buffer over a stale empty placeholder.
+fn tool_state(initial: serde_json::Value, buffer: &str) -> ToolUseState {
+    ToolUseState {
+        id: "t1".into(),
+        name: "exec_shell".into(),
+        input: initial,
+        caller: None,
+        input_buffer: buffer.into(),
+    }
+}
+
+#[test]
+fn final_tool_input_prefers_parsed_buffer_over_empty_initial() {
+    // The exact regression: ContentBlockStart delivered `{}`, then args
+    // streamed in via InputJsonDelta. The emitted ToolCallStarted must
+    // carry the parsed buffer, not the placeholder.
+    let state = tool_state(json!({}), r#"{"command": "ls -la"}"#);
+    assert_eq!(final_tool_input(&state), json!({"command": "ls -la"}));
+}
+
+#[test]
+fn final_tool_input_falls_back_to_initial_when_buffer_empty() {
+    // Models occasionally embed args directly in the start frame and never
+    // send any InputJsonDelta. We must still report those args.
+    let state = tool_state(json!({"command": "echo hi"}), "");
+    assert_eq!(final_tool_input(&state), json!({"command": "echo hi"}));
+}
+
+#[test]
+fn final_tool_input_falls_back_to_initial_when_buffer_unparseable() {
+    // If the model ships partial JSON we never managed to parse, we keep
+    // whatever the per-delta parser last accepted (mirrored into `input`).
+    let state = tool_state(json!({"command": "echo hi"}), "{not json");
+    assert_eq!(final_tool_input(&state), json!({"command": "echo hi"}));
+}

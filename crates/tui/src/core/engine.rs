@@ -445,6 +445,27 @@ pub(crate) fn filter_tool_call_delta(delta: &str, in_tool_call: &mut bool) -> St
     output
 }
 
+/// Compute the tool input that should be reported when a tool's stream block
+/// closes (`ContentBlockStop`). Prefers the parsed `input_buffer` over the
+/// initial `input` placeholder so a `ToolCallStarted` event never carries a
+/// stale `{}` when args were actually streamed in via `InputJsonDelta`.
+///
+/// Order of preference:
+///   1. `input_buffer` parses cleanly → use that.
+///   2. `input_buffer` is empty → fall back to `input` (model embedded args
+///      directly in the `ContentBlockStart` frame and sent no deltas).
+///   3. `input_buffer` non-empty but unparseable → fall back to `input`
+///      (the per-delta parser has already mirrored the most recent valid
+///      partial parse into `tool_state.input`).
+fn final_tool_input(state: &ToolUseState) -> serde_json::Value {
+    if !state.input_buffer.trim().is_empty()
+        && let Some(parsed) = parse_tool_input(&state.input_buffer)
+    {
+        return parsed;
+    }
+    state.input.clone()
+}
+
 fn parse_tool_input(buffer: &str) -> Option<serde_json::Value> {
     let trimmed = buffer.trim();
     if trimmed.is_empty() {
@@ -2748,14 +2769,10 @@ impl Engine {
                             ));
                             current_block_kind = Some(ContentBlockKind::ToolUse);
                             current_tool_index = Some(tool_uses.len());
-                            let _ = self
-                                .tx_event
-                                .send(Event::ToolCallStarted {
-                                    id: id.clone(),
-                                    name: name.clone(),
-                                    input: json!({}),
-                                })
-                                .await;
+                            // ToolCallStarted is deferred to ContentBlockStop —
+                            // see `final_tool_input`. Emitting here would ship
+                            // the placeholder `{}` and the cell would render
+                            // `<command>` / `<file>` literals to the user.
                             tool_uses.push(ToolUseState {
                                 id,
                                 name,
@@ -2771,14 +2788,6 @@ impl Engine {
                             ));
                             current_block_kind = Some(ContentBlockKind::ToolUse);
                             current_tool_index = Some(tool_uses.len());
-                            let _ = self
-                                .tx_event
-                                .send(Event::ToolCallStarted {
-                                    id: id.clone(),
-                                    name: name.clone(),
-                                    input: json!({}),
-                                })
-                                .await;
                             tool_uses.push(ToolUseState {
                                 id,
                                 name,
@@ -2896,6 +2905,20 @@ impl Engine {
                                     tool_state.name, tool_state.input
                                 ));
                             }
+
+                            // Now that the input is finalized, announce the
+                            // tool call to the UI. Deferring to here is what
+                            // keeps the cell from rendering `<command>` /
+                            // `<file>` placeholders during the brief window
+                            // between block start and the last InputJsonDelta.
+                            let _ = self
+                                .tx_event
+                                .send(Event::ToolCallStarted {
+                                    id: tool_state.id.clone(),
+                                    name: tool_state.name.clone(),
+                                    input: final_tool_input(tool_state),
+                                })
+                                .await;
                         }
                     }
                     StreamEvent::MessageDelta {

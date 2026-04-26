@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **Tool-call cells no longer flash `<command>` / `<file>` placeholders.** The engine used to emit `ToolCallStarted` from `ContentBlockStart` with `input: {}` — before any `InputJsonDelta` had streamed in — which baked the placeholder into the cell at creation time. The emission is now deferred to `ContentBlockStop` and routed through `final_tool_input`, so the cell is created with the parsed args already in hand. (engine.rs `final_tool_input`; engine/tests.rs `final_tool_input_*`)
+
+### Changed
+- **Tool labels use progressive verbs.** "Read foo.rs" → "Reading foo.rs", "List X" → "Listing X", "Search pattern" → "Searching for `pattern`", "List files" → "Listing files". Past-tense labels read wrong while a tool is still in flight; the new forms match what the user actually sees.
+- **Long-running tools grow an elapsed badge.** From 3 s onward the `running` status segment becomes `running (3s)`, `running (4s)`, … so the user can tell a tool isn't stuck. The status-animation tick (360 ms) drives the redraw; below 3 s the badge stays hidden so quick reads/greps don't churn. (history.rs `running_status_label_with_elapsed`)
+- **Spinner pulse is twice as fast** — `TOOL_STATUS_SYMBOL_MS` 1800 ms → 720 ms per glyph (full 4-glyph heartbeat in ~2.88 s instead of ~7.2 s).
+
 ## [0.6.0] - 2026-04-25
 
 ### Added

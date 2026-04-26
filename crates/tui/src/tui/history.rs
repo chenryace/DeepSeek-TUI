@@ -22,7 +22,11 @@ const TOOL_COMMAND_LINE_LIMIT: usize = 3;
 const TOOL_OUTPUT_LINE_LIMIT: usize = 6;
 const TOOL_TEXT_LIMIT: usize = 180;
 const TOOL_RUNNING_SYMBOLS: [&str; 4] = ["·", "◦", "•", "◦"];
-const TOOL_STATUS_SYMBOL_MS: u64 = 1_800;
+// Spinner cadence per glyph. The status-animation tick (UI_STATUS_ANIMATION_MS
+// = 360 ms) fires every two glyphs, so a full 4-glyph "heartbeat" lands in
+// ~2.88 s — fast enough that the user sees motion within a few hundred ms of
+// starting a tool, slow enough to read as a pulse rather than a strobe.
+const TOOL_STATUS_SYMBOL_MS: u64 = 720;
 const TOOL_CARD_SUMMARY_LINES: usize = 4;
 const THINKING_SUMMARY_LINE_LIMIT: usize = 4;
 const TOOL_DONE_SYMBOL: &str = "•";
@@ -1630,6 +1634,18 @@ fn render_tool_header(
     started_at: Option<Instant>,
     low_motion: bool,
 ) -> Line<'static> {
+    // For long-running tools, append elapsed seconds so the user can see the
+    // call isn't stuck. Threshold matches the eye's "did this hang?" reflex
+    // — under 3s we stay quiet so quick reads/greps don't visually churn.
+    let state_owned: String = if state == "running"
+        && status == ToolStatus::Running
+        && let Some(started) = started_at
+    {
+        running_status_label_with_elapsed(started.elapsed().as_secs())
+    } else {
+        state.to_string()
+    };
+
     Line::from(vec![
         Span::styled(
             format!("{} ", status_symbol(started_at, status, low_motion)),
@@ -1637,8 +1653,20 @@ fn render_tool_header(
         ),
         Span::styled(title.to_string(), tool_title_style()),
         Span::styled(" ", Style::default()),
-        Span::styled(state.to_string(), tool_status_style(status)),
+        Span::styled(state_owned, tool_status_style(status)),
     ])
+}
+
+/// Build the "running" label with an elapsed-seconds badge for long-running
+/// tools. Below 3s the badge is suppressed to avoid visual churn for tools
+/// that resolve in milliseconds; at 3s and beyond the badge appears and ticks
+/// every second the tool stays in flight.
+pub(crate) fn running_status_label_with_elapsed(elapsed_secs: u64) -> String {
+    if elapsed_secs < 3 {
+        "running".to_string()
+    } else {
+        format!("running ({elapsed_secs}s)")
+    }
 }
 
 fn render_card_detail_line(
@@ -1760,11 +1788,30 @@ mod tests {
     use super::{
         ExecCell, ExecSource, HistoryCell, PlanStep, PlanUpdateCell, TOOL_RUNNING_SYMBOLS,
         TOOL_STATUS_SYMBOL_MS, ToolCell, ToolStatus, TranscriptRenderOptions,
-        extract_reasoning_summary, render_thinking,
+        extract_reasoning_summary, render_thinking, running_status_label_with_elapsed,
     };
     use crate::deepseek_theme::Theme;
     use ratatui::style::Modifier;
     use std::time::{Duration, Instant};
+
+    // ---- elapsed-seconds badge for long-running tools ----
+    //
+    // Below 3s the label stays "running" — quick reads/greps shouldn't
+    // visually churn. From 3s onward the badge appears and ticks each
+    // second so the user can tell the call hasn't hung.
+    #[test]
+    fn running_status_label_omits_elapsed_below_threshold() {
+        assert_eq!(running_status_label_with_elapsed(0), "running");
+        assert_eq!(running_status_label_with_elapsed(1), "running");
+        assert_eq!(running_status_label_with_elapsed(2), "running");
+    }
+
+    #[test]
+    fn running_status_label_appends_elapsed_at_three_seconds() {
+        assert_eq!(running_status_label_with_elapsed(3), "running (3s)");
+        assert_eq!(running_status_label_with_elapsed(7), "running (7s)");
+        assert_eq!(running_status_label_with_elapsed(120), "running (120s)");
+    }
 
     #[test]
     fn extract_reasoning_summary_prefers_summary_block() {
