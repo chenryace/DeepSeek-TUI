@@ -131,15 +131,3 @@ pub fn load_from_workspace(workspace: &Path) -> Option<String> {
     let paths = discover_paths(workspace);
     read_project_docs(&paths, DEFAULT_MAX_BYTES)
 }
-
-/// Check if workspace has any project doc
-#[allow(dead_code)]
-pub fn has_project_doc(workspace: &Path) -> bool {
-    !discover_paths(workspace).is_empty()
-}
-
-/// Get the primary project doc path (for display)
-#[allow(dead_code)]
-pub fn primary_doc_path(workspace: &Path) -> Option<PathBuf> {
-    discover_paths(workspace).into_iter().next()
-}

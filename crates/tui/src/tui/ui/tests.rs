@@ -1,5 +1,9 @@
 use super::*;
 use crate::config::Config;
+use crate::tui::file_mention::{
+    find_file_mention_completions, partial_file_mention_at_cursor, try_autocomplete_file_mention,
+    user_request_with_file_mentions,
+};
 use crate::tui::history::{GenericToolCell, ToolCell, ToolStatus};
 use crate::tui::views::{ModalView, ViewAction};
 use std::path::PathBuf;
@@ -395,11 +399,16 @@ fn footer_coherence_chip_hides_healthy_and_uses_clear_labels() {
         "healthy state should produce no footer chip"
     );
 
+    // GettingCrowded is intentionally suppressed — see the rationale in
+    // `footer_coherence_spans`. The footer only surfaces active engine
+    // interventions; soft pressure hints stay quiet.
+    app.coherence_state = crate::core::coherence::CoherenceState::GettingCrowded;
+    assert!(
+        footer_coherence_spans(&app).is_empty(),
+        "GettingCrowded should not surface a footer chip; only active interventions do"
+    );
+
     let cases = [
-        (
-            crate::core::coherence::CoherenceState::GettingCrowded,
-            "high load",
-        ),
         (
             crate::core::coherence::CoherenceState::RefreshingContext,
             "refreshing context",

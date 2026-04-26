@@ -27,6 +27,7 @@ EXPLORATION:
 - list_dir: Browse directories in the workspace
 - read_file: Read file contents to understand context
 - grep_files: Search files by regex
+- rlm_query: Run 1–16 cheap parallel children on `deepseek-v4-flash` for fan-out analysis ("review these 4 angles in parallel"). Pass `prompt` for one call or `prompts: [...]` for batched. Useful when one Pro turn would have to enumerate sequentially.
 - web_search: Quick web search (fallback when citations are not needed)
 - request_user_input: Ask the user short multiple-choice questions
 

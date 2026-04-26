@@ -21,10 +21,11 @@ DeepSeek TUI is a coding agent that runs entirely in your terminal. It gives Dee
 
 ### Key Features
 
+- 🌊 **Native RLM** *(new in v0.6)* — `rlm_query` tool fans out 1–16 cheap `deepseek-v4-flash` children in parallel against the existing DeepSeek client. The model uses it for batched analysis, decomposition, or cheap parallel reasoning — one structured tool call, no external runtime
 - 🧠 **Thinking-mode streaming** — watch DeepSeek's chain-of-thought as it reasons about your code
 - 🔧 **Full tool suite** — file ops, shell execution, git, web search/browse, apply-patch, sub-agents, MCP servers, and more
 - 🪟 **1M-token context** — feed entire codebases; automatic intelligent compaction when context fills up
-- 🎛️ **Three interaction modes** — Plan (read-only explore), Agent (interactive with approval), YOLO (auto-approved)
+- 🎛️ **Three interaction modes** — Plan (read-only explore), Agent (interactive with approval), YOLO (auto-approved). All three can call `rlm_query` for parallel research
 - ⚡ **Reasoning-effort tiers** — cycle through `off → high → max` with Shift+Tab
 - 🔄 **Session save/resume** — checkpoint and resume long sessions, fork conversations
 - 🌐 **HTTP/SSE runtime API** — `deepseek serve --http` for headless agent workflows
@@ -68,17 +69,45 @@ DEEPSEEK_PROVIDER=nvidia-nim NVIDIA_API_KEY="..." deepseek
 ```bash
 git clone https://github.com/Hmbown/DeepSeek-TUI.git
 cd DeepSeek-TUI
-cargo install --path crates/tui --locked   # requires Rust 1.85+
+cargo install --path crates/tui --bin deepseek-tui --locked   # requires Rust 1.85+
+cargo install --path crates/cli --bin deepseek --locked
 ```
 
 </details>
 
 ---
 
-## What's new in v0.5.0
+## What's new in v0.6.0
 
-- **Multi-turn tool calls no longer 400 on thinking-mode models.** Every assistant message now replays `reasoning_content` (with a safe placeholder when the round produced none), and a final-pass sanitizer guarantees the wire payload satisfies DeepSeek's thinking-mode contract — even for sessions restored from older checkpoints or sub-agents that bypass the engine path.
-- **Phantom `web.run` references stripped** from prompts and the `web_search` tool ([#25](https://github.com/Hmbown/DeepSeek-TUI/issues/25)).
+### 🌊 `rlm_query` — recursive language models as a first-class tool
+
+The model now has direct access to a native recursive-LLM primitive. Inspired by [Alex Zhang's RLM work](https://github.com/alexzhang13/rlm) and Sakana AI's published research on novelty search, but trimmed to what an agent loop actually needs: one tool, structured args, no DSL.
+
+```jsonc
+// Single child:
+rlm_query({ "prompt": "Summarise this 4k-line log: ..." })
+
+// 8 parallel children, indexed result:
+rlm_query({
+  "prompts": [
+    "Review src/foo.rs for race conditions: ...",
+    "Review src/foo.rs for input validation: ...",
+    "Review src/foo.rs for error-handling gaps: ...",
+    "..."
+  ]
+})
+
+// Promote one call to Pro:
+rlm_query({ "prompt": "Hard reasoning here", "model": "deepseek-v4-pro" })
+```
+
+Children run concurrently against the existing DeepSeek client via `tokio` — no external binary, no Python sandbox, no fenced-block DSL. Returns a single string for one prompt or `[i] ...` indexed blocks for many. Available in Plan / Agent / YOLO. The cost is folded into the session's running total automatically.
+
+### Other changes
+
+- **Scroll position survives content rewrites** — anchor fallback now clamps to the nearest surviving cell instead of teleporting to the bottom (#56)
+- **Looser command-safety chains** — `cargo build && cargo test` is no longer blocked outright; chains of known-safe commands escalate to RequiresApproval instead of Dangerous (#57)
+- **Multi-turn tool calls no longer 400 on thinking-mode models** — `reasoning_content` is replayed across user-message boundaries with a safe placeholder when the round produced none
 
 Full history: [CHANGELOG.md](CHANGELOG.md).
 
@@ -137,6 +166,8 @@ deepseek serve --http                         # HTTP/SSE API server
 | **Plan** 🔍 | Read-only investigation — model explores and proposes a plan before making changes |
 | **Agent** 🤖 | Default interactive mode — multi-step tool use with approval gates |
 | **YOLO** ⚡ | Auto-approve all tools in a trusted workspace (use with caution) |
+
+All three modes have access to the `rlm_query` tool for parallel/batched LLM fan-out (see "What's new in v0.6.0" above).
 
 ---
 

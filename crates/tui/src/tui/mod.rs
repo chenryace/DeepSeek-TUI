@@ -8,6 +8,7 @@ pub mod clipboard;
 pub mod command_palette;
 pub mod diff_render;
 pub mod event_broker;
+pub mod file_mention;
 pub mod history;
 pub mod markdown_render;
 pub mod model_picker;

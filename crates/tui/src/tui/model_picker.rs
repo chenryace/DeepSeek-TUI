@@ -358,7 +358,15 @@ mod tests {
             yolo: false,
             resume_session_id: None,
         };
-        App::new(options, &Config::default())
+        let mut app = App::new(options, &Config::default());
+        // App::new merges in `~/.config/deepseek/settings.toml` /
+        // `Application Support/deepseek/settings.toml`, which can override
+        // the model and effort with whatever the developer happens to have
+        // saved. Pin both back to known values so the picker tests below
+        // exercise the picker logic, not the user's environment.
+        app.model = "deepseek-v4-pro".to_string();
+        app.reasoning_effort = ReasoningEffort::Max;
+        app
     }
 
     #[test]

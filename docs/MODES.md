@@ -2,18 +2,19 @@
 
 DeepSeek TUI has two related concepts:
 
-- **TUI mode**: what kind of visible interaction you're in (Plan/Agent/YOLO/Hetun).
+- **TUI mode**: what kind of visible interaction you're in (Plan/Agent/YOLO).
 - **Approval mode**: how aggressively the UI asks before executing tools.
 
 ## TUI Modes
 
-Press `Tab` to cycle through the visible modes: **Plan → Agent → YOLO → Hetun → Plan**.
-Press `Shift+Tab` to cycle in reverse. Hetun sits at the end of the cycle so a fresh session doesn't land on it accidentally — the default landing mode is unchanged.
+Press `Tab` to cycle through the visible modes: **Plan → Agent → YOLO → Plan**.
+Press `Shift+Tab` to cycle reasoning effort.
 
 - **Plan**: design-first prompting. Read-only investigation tools stay available; shell and patch execution stay off. Use this when you want to think out loud and produce a plan to hand to a human (yourself later, or a reviewer).
-- **Agent**: multi-step tool use. Approvals for shell and paid tools (file writes are allowed without a prompt). RLM is available — the model reaches for `repl` blocks when the work is decomposable.
-- **YOLO**: enables shell + trust mode and auto-approves all tools. RLM is available and auto-executes like everything else. Use only in trusted repos.
-- **Hetun** (河豚, "Plan + Recursive Agents"): the most opinionated mode the TUI offers. The model uses RLM aggressively to research and decompose tasks in parallel via cheap `deepseek-v4-flash` child calls, then presents a consolidated **mission** for your approval. Once approved, the RLM tree auto-executes without per-tool interruption — you approve the mission, not each individual bullet. Plan + execution folded into one rhythm.
+- **Agent**: multi-step tool use. Approvals for shell and paid tools (file writes are allowed without a prompt).
+- **YOLO**: enables shell + trust mode and auto-approves all tools. Use only in trusted repos.
+
+All three modes have access to the `rlm_query` tool — a structured tool call that fans out 1–16 cheap parallel children on `deepseek-v4-flash`. The model reaches for it when work is decomposable.
 
 ## Compatibility Notes
 
@@ -44,16 +45,6 @@ Legacy note: `/set approval_mode ...` was retired in favor of `/config`.
 - `suggest` (default): uses the per-mode rules above.
 - `auto`: auto-approves all tools (similar to YOLO approval behavior, but without forcing YOLO mode).
 - `never`: blocks any tool that isn't considered safe/read-only.
-
-### Task-level approval (Hetun mode)
-
-Hetun mode introduces a higher-level approval concept. Before executing an RLM tree, the engine presents a **mission card** showing what will be done, estimated flash calls, and expected outcomes. You can:
-
-- **Approve** — the RLM tree runs without further prompts.
-- **Reject** — the engine returns to planning.
-- **Modify** — edit the mission description and re-submit.
-
-This is independent of the base `approval_mode` setting. If you set `approval_mode = auto` while in Hetun, you still see mission cards (task-level approval is part of the mode, not the approval policy).
 
 ## Small-Screen Status Behavior
 
@@ -87,7 +78,6 @@ Run `deepseek --help` for the canonical list. Common flags:
 - `--model <MODEL>`: when using the `deepseek` facade, forward a DeepSeek model override to the TUI
 - `--workspace <DIR>`: workspace root for file tools
 - `--yolo`: start in YOLO mode
-- `--hetun`: start in Hetun mode
 - `-r, --resume <ID|PREFIX|latest>`: resume a saved session
 - `-c, --continue`: resume the most recent session
 - `--max-subagents <N>`: clamp to `1..=20`

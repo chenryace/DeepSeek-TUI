@@ -193,8 +193,16 @@ fn yolo_mode_keeps_tools_preloaded() {
 
 #[test]
 fn non_yolo_mode_retains_default_defer_policy() {
-    assert!(should_default_defer_tool("exec_shell", AppMode::Agent));
+    // Shell tools are kept loaded in action modes so the model can verify
+    // work without an extra ToolSearch round-trip; non-action tools (e.g.
+    // MCP) still defer.
+    assert!(!should_default_defer_tool("exec_shell", AppMode::Agent));
+    assert!(should_default_defer_tool("exec_shell", AppMode::Plan));
     assert!(!should_default_defer_tool("read_file", AppMode::Agent));
+    assert!(should_default_defer_tool(
+        "mcp_read_resource",
+        AppMode::Agent
+    ));
 }
 
 #[test]

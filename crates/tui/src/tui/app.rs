@@ -827,7 +827,6 @@ impl App {
 
         let entering_yolo = mode == AppMode::Yolo && previous_mode != AppMode::Yolo;
         let leaving_yolo = previous_mode == AppMode::Yolo && mode != AppMode::Yolo;
-
         self.mode = mode;
         self.status_message = Some(format!("Switched to {} mode", mode.label()));
 
@@ -863,7 +862,7 @@ impl App {
         true
     }
 
-    /// Cycle through modes: Plan -> Agent -> YOLO
+    /// Cycle through modes: Plan → Agent → YOLO → Plan.
     pub fn cycle_mode(&mut self) {
         let next = match self.mode {
             AppMode::Plan => AppMode::Agent,
@@ -873,7 +872,7 @@ impl App {
         let _ = self.set_mode(next);
     }
 
-    /// Cycle through modes in reverse: YOLO -> Agent -> Plan
+    /// Cycle through modes in reverse.
     #[allow(dead_code)]
     pub fn cycle_mode_reverse(&mut self) {
         let next = match self.mode {

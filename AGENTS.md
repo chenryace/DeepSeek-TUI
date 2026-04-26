@@ -11,6 +11,9 @@ This file provides context for AI assistants working on this project.
 - Format: `cargo fmt --all`
 - Run: `cargo run -p deepseek-tui`
 
+### Build Dependencies
+- **Rust** 1.85+ (for the workspace)
+
 ### Documentation
 See README.md for project overview, docs/ARCHITECTURE.md for internals.
 
@@ -25,4 +28,4 @@ See README.md for project overview, docs/ARCHITECTURE.md for internals.
 ## Important Notes
 
 - **Token/cost tracking inaccuracies**: Token counting and cost estimation may be inflated due to thinking token accounting bugs. Use `/compact` to manage context, and treat cost estimates as approximate.
-- **Modes**: Three modes — Plan (read-only investigation), Agent (tool use with approval), YOLO (auto-approved). See `docs/MODES.md` for details.
+- **Modes**: Three modes — Plan (read-only investigation), Agent (tool use with approval), YOLO (auto-approved). See `docs/MODES.md` for details. All three modes can call the `rlm_query` tool for parallel/batched LLM fan-out (`crates/tui/src/tools/rlm_query.rs`).

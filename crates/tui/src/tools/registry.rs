@@ -381,6 +381,14 @@ impl ToolRegistryBuilder {
         self.with_tool(Arc::new(ApplyPatchTool))
     }
 
+    /// Include the native RLM tool (`rlm_query`). Parallel/batched LLM
+    /// fan-out runs through the existing DeepSeek client.
+    #[must_use]
+    pub fn with_rlm_query_tool(self, client: Option<DeepSeekClient>) -> Self {
+        use super::rlm_query::RlmQueryTool;
+        self.with_tool(Arc::new(RlmQueryTool::new(client)))
+    }
+
     /// Include the review tool.
     #[must_use]
     pub fn with_review_tool(self, client: Option<DeepSeekClient>, model: String) -> Self {

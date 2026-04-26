@@ -564,6 +564,22 @@ fn should_default_defer_tool(name: &str, mode: AppMode) -> bool {
         return false;
     }
 
+    // Shell tools are kept active in Agent so the model can run verification
+    // commands (build/test/git/cargo) without first having to discover the
+    // tool through ToolSearch. Plan mode never registers shell tools.
+    let always_loaded_in_action_modes = matches!(mode, AppMode::Agent)
+        && matches!(
+            name,
+            "exec_shell"
+                | "exec_shell_wait"
+                | "exec_shell_interact"
+                | "exec_wait"
+                | "exec_interact"
+        );
+    if always_loaded_in_action_modes {
+        return false;
+    }
+
     !matches!(
         name,
         "read_file"
@@ -571,6 +587,7 @@ fn should_default_defer_tool(name: &str, mode: AppMode) -> bool {
             | "grep_files"
             | "file_search"
             | "diagnostics"
+            | "rlm_query"
             | MULTI_TOOL_PARALLEL_NAME
             | "update_plan"
             | "todo_write"
@@ -1696,6 +1713,7 @@ impl Engine {
 
         builder = builder
             .with_review_tool(self.deepseek_client.clone(), self.session.model.clone())
+            .with_rlm_query_tool(self.deepseek_client.clone())
             .with_user_input_tool()
             .with_parallel_tool();
 
@@ -2956,8 +2974,9 @@ impl Engine {
                 let _ = self.tx_event.send(Event::MessageComplete { index }).await;
             }
 
+            // RLM is a structured tool call (`rlm_query`) handled by the
+            // normal tool dispatch path; no content rewrite required.
             // DeepSeek chat API rejects assistant messages that contain only
-            // reasoning/thinking content without visible text or tool calls.
             // Keep thinking for UI stream events, but persist only sendable
             // assistant turns in the conversation state.
             let has_sendable_assistant_content = content_blocks.iter().any(|block| {

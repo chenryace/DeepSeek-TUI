@@ -256,6 +256,16 @@ pub fn analyze_command(command: &str) -> SafetyAnalysis {
     }
 
     if command.contains("&&") || command.contains("||") || command.contains(';') {
+        // Chains of known-safe commands (cargo/git/zig/npm/etc.) are routine
+        // for build+test workflows and should not be hard-blocked. Escalate to
+        // RequiresApproval so the user still has the chance to deny in
+        // non-trusted modes; YOLO/auto-approve passes through.
+        if all_segments_known_safe(command) {
+            return SafetyAnalysis::requires_approval(
+                command,
+                vec!["Command chains known-safe segments (cargo/git/etc.)".to_string()],
+            );
+        }
         return SafetyAnalysis::dangerous(
             command,
             vec!["Command chaining detected".to_string()],
@@ -377,6 +387,44 @@ fn is_safe_command(command: &str) -> bool {
     }
 
     false
+}
+
+/// Build/test/source-control commands that are reasonable to chain in a
+/// trusted workspace (`cd /tmp/foo && cargo build`, `cargo test --workspace
+/// && cargo clippy`, etc.). The match is by leading token, not full string,
+/// so flags don't trip the check.
+const KNOWN_SAFE_CHAIN_PREFIXES: &[&str] = &[
+    "cargo", "rustc", "rustup", "git", "gh", "hub", "npm", "yarn", "pnpm", "node", "npx", "zig",
+    "go", "deno", "bun", "make", "cmake", "ninja", "meson", "python", "python3", "pip", "pip3",
+    "uv", "poetry", "ls", "pwd", "cd", "echo", "cat", "head", "tail", "grep", "rg", "find", "fd",
+    "wc", "sort", "uniq", "which", "env", "true", "false",
+];
+
+/// Return true when every segment of a chained command (`a && b ; c || d`)
+/// has a leading token in `KNOWN_SAFE_CHAIN_PREFIXES`. Used to permit routine
+/// build+test chains without escalating to Dangerous.
+fn all_segments_known_safe(command: &str) -> bool {
+    let normalized = command
+        .replace("&&", "\n")
+        .replace("||", "\n")
+        .replace(';', "\n");
+    let segments: Vec<&str> = normalized
+        .split('\n')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect();
+    if segments.is_empty() {
+        return false;
+    }
+    segments.iter().all(|seg| {
+        let head = seg
+            .split_whitespace()
+            .find(|tok| !tok.contains('=') && *tok != "env")
+            .unwrap_or("");
+        KNOWN_SAFE_CHAIN_PREFIXES
+            .iter()
+            .any(|prefix| head.eq_ignore_ascii_case(prefix))
+    })
 }
 
 /// Check if a command is safe within the workspace

@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-04-25
+
+### Added
+- **`rlm_query` tool — recursive language models as a first-class structured tool.** Inspired by [Alex Zhang's RLM work](https://github.com/alexzhang13/rlm) and Sakana AI's published novelty-search research, but trimmed to what an agent loop actually needs. The model calls `rlm_query` with one prompt or up to 16 concurrent prompts; children run on `deepseek-v4-flash` by default and can be promoted to Pro per-call. Children dispatch concurrently via `tokio::join_all` against the existing DeepSeek client — no external runtime, no fenced-block DSL, no Python sandbox. Returns plain text for one prompt, indexed `[0] ...\n\n---\n\n[1] ...` blocks for many. Available in Plan / Agent / YOLO. Cost is folded into the session's running total automatically.
+
+### Changed
+- **Scroll position survives content rewrites (#56).** `TranscriptScroll::resolve_top` and `scrolled_by` no longer teleport to bottom when the anchor cell vanishes. Three-level fallback chain: same line → same cell, line 0 → nearest surviving cell at-or-before. Previously, any rewrite of the assistant message (e.g. tool-result replacement) silently dropped the user back to the live tail mid-scroll.
+- **Looser command-safety chains (#57).** `cargo build && cargo test`, `git fetch && git rebase`, and similar chains of known-safe commands now escalate to `RequiresApproval` instead of being hard-blocked as `Dangerous`. Chains containing unknown commands still block.
+- **`GettingCrowded` no longer surfaces a footer chip.** The context-percent header already covers conversation pressure; the chip now only fires for active engine interventions (`refreshing context`, `verifying`, `resetting plan`).
+
 ## [0.5.2] - 2026-04-25
 
 ### Added

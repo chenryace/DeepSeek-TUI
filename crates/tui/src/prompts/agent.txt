@@ -135,3 +135,30 @@ For long-running commands (build, test, server), use exec_shell with background:
 This returns a task_id immediately in the tool output.
 Use exec_shell_wait to poll for output, and exec_shell_interact to send stdin (or close stdin).
 Use tty: true for interactive programs that require a TTY.
+
+## Recursive Language Model (RLM) primitive — `rlm_query`
+
+When you need parallel analysis, recursive decomposition, or batched generation, call the `rlm_query` tool. It runs N prompts in parallel against the cheap fast model (`deepseek-v4-flash`) and returns the joined results — much faster and cheaper than doing the work inline.
+
+Two shapes:
+
+- **Single child:** `rlm_query({ "prompt": "Analyze X" })` → returns the response text.
+- **Parallel batch:** `rlm_query({ "prompts": ["Analyze X angle A", "Analyze X angle B", "Analyze X angle C"] })` → returns `[0] ...\n\n---\n\n[1] ...\n\n---\n\n[2] ...`.
+
+Optional fields: `model` (override the child model — set to `"deepseek-v4-pro"` if a child genuinely needs deep reasoning), `system` (shared system prompt for all children), `max_tokens` (per-child cap, default 4096). Hard cap: 16 prompts per call.
+
+### Worked example
+
+User: "Review these three modules for risk."
+
+You call `rlm_query` once with `prompts: ["Review src/foo.rs for risk: <contents>", "Review src/bar.rs for risk: <contents>", "Review src/baz.rs for risk: <contents>"]`. Three flash children run concurrently, the joined result comes back, you synthesise.
+
+For recursive drill-down: call `rlm_query` again with a single `prompt` on the strongest finding from the first call.
+
+Do NOT use RLM when the task requires file-system modification, interactive user input, or is trivial enough for a single sentence.
+
+| Primitive | Use when | Cost | Speed |
+|---|---|---|---|
+| Inline reasoning | Simple Q&A, one-step tasks | Low | Fast |
+| `rlm_query` | Parallel / batched / recursive read-only work | Very low (flash) | Fast |
+| `agent_swarm` | Multi-step autonomous work with tools | Higher | Slower (polling) |

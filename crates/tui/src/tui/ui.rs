@@ -1,7 +1,7 @@
 //! TUI event loop and rendering logic for `DeepSeek` CLI.
 
 use std::fmt::Write;
-use std::io::{self, Read, Stdout};
+use std::io::{self, Stdout};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
@@ -16,7 +16,6 @@ use crossterm::{
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
-use ignore::WalkBuilder;
 use ratatui::{
     Frame, Terminal,
     backend::CrosstermBackend,
@@ -92,9 +91,6 @@ const SLASH_MENU_LIMIT: usize = 6;
 const MIN_CHAT_HEIGHT: u16 = 3;
 const MIN_COMPOSER_HEIGHT: u16 = 2;
 const CONTEXT_WARNING_THRESHOLD_PERCENT: f64 = 85.0;
-const MAX_FILE_MENTIONS_PER_MESSAGE: usize = 8;
-const MAX_MENTION_FILE_BYTES: u64 = 128 * 1024;
-const MAX_DIRECTORY_MENTION_ENTRIES: usize = 80;
 const CONTEXT_CRITICAL_THRESHOLD_PERCENT: f64 = 95.0;
 const UI_IDLE_POLL_MS: u64 = 48;
 const UI_ACTIVE_POLL_MS: u64 = 24;
@@ -1269,10 +1265,18 @@ async fn run_event_loop(
                     if try_autocomplete_slash_command(app) {
                         continue;
                     }
-                    if try_autocomplete_file_mention(app) {
+                    if crate::tui::file_mention::try_autocomplete_file_mention(app) {
                         continue;
                     }
+                    let prior_model = app.model.clone();
                     app.cycle_mode();
+                    if app.model != prior_model {
+                        let _ = engine_handle
+                            .send(Op::SetModel {
+                                model: app.model.clone(),
+                            })
+                            .await;
+                    }
                 }
                 KeyCode::BackTab => {
                     app.cycle_effort();
@@ -1587,7 +1591,7 @@ fn try_autocomplete_slash_command(app: &mut App) -> bool {
     }
 
     let names = matches.iter().map(|info| info.name).collect::<Vec<_>>();
-    let shared = longest_common_prefix(&names);
+    let shared = crate::tui::file_mention::longest_common_prefix(&names);
 
     if !shared.is_empty() && shared.len() > prefix.len() {
         app.input = format!("/{shared}");
@@ -1614,189 +1618,6 @@ fn try_autocomplete_slash_command(app: &mut App) -> bool {
         .join(", ");
     app.status_message = Some(format!("Suggestions: {preview}"));
     true
-}
-
-/// Maximum file-mention completion candidates to consider per keypress. Caps
-/// the cost of walking large workspaces; subsequent keystrokes narrow further.
-const FILE_MENTION_COMPLETION_LIMIT: usize = 64;
-
-/// Maximum directory depth walked when completing a file mention. Mirrors the
-/// existing `project_tree` cutoff and keeps Tab snappy in deep monorepos.
-const FILE_MENTION_COMPLETION_DEPTH: usize = 6;
-
-/// If the cursor sits inside a `@<partial>` token in the input, return the
-/// byte offset where the `@` starts (so we can splice in a completion) and
-/// the partial path the user has typed so far. The token stops at whitespace
-/// or the end of input. Returns `None` when the cursor is outside any mention
-/// or the token is empty (`@` with nothing after it).
-fn partial_file_mention_at_cursor(input: &str, cursor_chars: usize) -> Option<(usize, String)> {
-    let chars: Vec<char> = input.chars().collect();
-    if cursor_chars > chars.len() {
-        return None;
-    }
-    // Walk left from the cursor until we find an `@` or a whitespace; if
-    // whitespace comes first the cursor isn't inside a mention.
-    let mut start_chars = cursor_chars;
-    while start_chars > 0 {
-        let prev = chars[start_chars - 1];
-        if prev == '@' {
-            start_chars -= 1;
-            break;
-        }
-        if prev.is_whitespace() {
-            return None;
-        }
-        start_chars -= 1;
-    }
-    if start_chars == cursor_chars || chars.get(start_chars) != Some(&'@') {
-        return None;
-    }
-    // Confirm the `@` itself is at a valid mention boundary.
-    if !is_file_mention_start(&chars, start_chars) {
-        return None;
-    }
-    // Consume from the `@` to the next whitespace (the end of the token).
-    let mut end_chars = start_chars + 1;
-    while end_chars < chars.len() && !chars[end_chars].is_whitespace() {
-        end_chars += 1;
-    }
-    let partial: String = chars[start_chars + 1..end_chars].iter().collect();
-    let byte_start: usize = chars[..start_chars].iter().map(|c| c.len_utf8()).sum();
-    Some((byte_start, partial))
-}
-
-/// Walk the workspace and return relative paths whose representation matches
-/// the partial mention. A file matches when its case-insensitive relative
-/// path either starts with the partial or contains it as a substring; the
-/// former rank earlier so a partial like `docs/de` resolves to
-/// `docs/deepseek_v4.pdf` before any path that merely contains those bytes.
-fn find_file_mention_completions(workspace: &Path, partial: &str, limit: usize) -> Vec<String> {
-    if limit == 0 {
-        return Vec::new();
-    }
-    let needle = partial.to_lowercase();
-    let mut prefix_hits: Vec<String> = Vec::new();
-    let mut substring_hits: Vec<String> = Vec::new();
-
-    let mut builder = WalkBuilder::new(workspace);
-    builder
-        .hidden(true)
-        .follow_links(false)
-        .max_depth(Some(FILE_MENTION_COMPLETION_DEPTH));
-
-    for entry in builder.build().flatten() {
-        if prefix_hits.len() + substring_hits.len() >= limit {
-            break;
-        }
-        let path = entry.path();
-        let Ok(rel) = path.strip_prefix(workspace) else {
-            continue;
-        };
-        let rel_str = rel.to_string_lossy().replace('\\', "/");
-        if rel_str.is_empty() {
-            continue;
-        }
-        let is_dir = entry.file_type().is_some_and(|ft| ft.is_dir());
-        let candidate = if is_dir {
-            format!("{rel_str}/")
-        } else {
-            rel_str.clone()
-        };
-        let lower = candidate.to_lowercase();
-        if needle.is_empty() || lower.starts_with(&needle) {
-            prefix_hits.push(candidate);
-        } else if lower.contains(&needle) {
-            substring_hits.push(candidate);
-        }
-    }
-
-    prefix_hits.sort();
-    substring_hits.sort();
-    prefix_hits.extend(substring_hits);
-    prefix_hits.truncate(limit);
-    prefix_hits
-}
-
-/// Tab-completion handler for `@file` mentions. Mirrors the slash-command
-/// flow: a single match is applied directly; multiple matches with a longer
-/// shared prefix extend the partial; otherwise the first few candidates are
-/// surfaced via the status line. Returns true when the input was modified or
-/// a suggestion was offered, so the caller can short-circuit other handlers.
-fn try_autocomplete_file_mention(app: &mut App) -> bool {
-    let Some((byte_start, partial)) =
-        partial_file_mention_at_cursor(&app.input, app.cursor_position)
-    else {
-        return false;
-    };
-    let workspace = app.workspace.clone();
-    let candidates =
-        find_file_mention_completions(&workspace, &partial, FILE_MENTION_COMPLETION_LIMIT);
-    if candidates.is_empty() {
-        app.status_message = Some(format!("No files match @{partial}"));
-        return true;
-    }
-    if candidates.len() == 1 {
-        replace_file_mention(app, byte_start, &partial, &candidates[0]);
-        app.status_message = Some(format!("Attached @{}", candidates[0]));
-        return true;
-    }
-    let candidate_refs: Vec<&str> = candidates.iter().map(String::as_str).collect();
-    let shared = longest_common_prefix(&candidate_refs);
-    if shared.len() > partial.len() {
-        replace_file_mention(app, byte_start, &partial, shared);
-        app.status_message = Some(format!("@{shared}…"));
-        return true;
-    }
-    let preview = candidates
-        .iter()
-        .take(5)
-        .map(|c| format!("@{c}"))
-        .collect::<Vec<_>>()
-        .join(", ");
-    app.status_message = Some(format!("Matches: {preview}"));
-    true
-}
-
-/// Splice a completion into the input, replacing the `@<partial>` token at
-/// `byte_start` with `@<replacement>`. Cursor moves to the end of the new
-/// token so further keystrokes extend (or escape via space) naturally.
-fn replace_file_mention(app: &mut App, byte_start: usize, partial: &str, replacement: &str) {
-    let original_token_len = '@'.len_utf8() + partial.len();
-    let original_token_end = byte_start + original_token_len;
-    let mut new_input =
-        String::with_capacity(app.input.len() - original_token_len + 1 + replacement.len());
-    new_input.push_str(&app.input[..byte_start]);
-    new_input.push('@');
-    new_input.push_str(replacement);
-    if original_token_end < app.input.len() {
-        new_input.push_str(&app.input[original_token_end..]);
-    }
-    let new_cursor_chars =
-        app.input[..byte_start].chars().count() + 1 + replacement.chars().count();
-    app.input = new_input;
-    app.cursor_position = new_cursor_chars;
-}
-
-fn longest_common_prefix<'a>(values: &[&'a str]) -> &'a str {
-    let Some(first) = values.first().copied() else {
-        return "";
-    };
-    let mut end = first.len();
-
-    for value in values.iter().skip(1) {
-        while end > 0 && !value.starts_with(&first[..end]) {
-            end -= 1;
-            // Ensure we land on a valid UTF-8 char boundary.
-            while end > 0 && !first.is_char_boundary(end) {
-                end -= 1;
-            }
-        }
-        if end == 0 {
-            return "";
-        }
-    }
-
-    &first[..end]
 }
 
 async fn fetch_available_models(config: &Config) -> Result<Vec<String>> {
@@ -2034,254 +1855,13 @@ fn build_queued_message(app: &mut App, input: String) -> QueuedMessage {
 }
 
 fn queued_message_content_for_app(app: &App, message: &QueuedMessage) -> String {
-    let user_request = user_request_with_file_mentions(&message.display, &app.workspace);
+    let user_request =
+        crate::tui::file_mention::user_request_with_file_mentions(&message.display, &app.workspace);
     if let Some(skill_instruction) = message.skill_instruction.as_ref() {
         format!("{skill_instruction}\n\n---\n\nUser request: {user_request}")
     } else {
         user_request
     }
-}
-
-fn user_request_with_file_mentions(input: &str, workspace: &Path) -> String {
-    let Some(context) = local_context_from_file_mentions(input, workspace) else {
-        return input.to_string();
-    };
-    format!("{input}\n\n---\n\nLocal context from @mentions:\n{context}")
-}
-
-fn local_context_from_file_mentions(input: &str, workspace: &Path) -> Option<String> {
-    let mentions = extract_file_mentions(input);
-    if mentions.is_empty() {
-        return None;
-    }
-
-    let mut blocks = Vec::new();
-    let mut seen = std::collections::HashSet::new();
-    for mention in mentions.into_iter().take(MAX_FILE_MENTIONS_PER_MESSAGE) {
-        let path = resolve_mention_path(&mention, workspace);
-        let display_path = path
-            .canonicalize()
-            .unwrap_or_else(|_| path.clone())
-            .display()
-            .to_string();
-        if !seen.insert(display_path.clone()) {
-            continue;
-        }
-        blocks.push(render_file_mention_context(&mention, &path, &display_path));
-    }
-
-    if blocks.is_empty() {
-        None
-    } else {
-        Some(blocks.join("\n\n"))
-    }
-}
-
-fn extract_file_mentions(input: &str) -> Vec<String> {
-    let chars: Vec<char> = input.chars().collect();
-    let mut mentions = Vec::new();
-    let mut idx = 0;
-
-    while idx < chars.len() {
-        if chars[idx] != '@' || !is_file_mention_start(&chars, idx) {
-            idx += 1;
-            continue;
-        }
-
-        let Some(next) = chars.get(idx + 1).copied() else {
-            break;
-        };
-        if next.is_whitespace() {
-            idx += 1;
-            continue;
-        }
-
-        if matches!(next, '"' | '\'') {
-            let quote = next;
-            let mut end = idx + 2;
-            let mut raw = String::new();
-            while end < chars.len() && chars[end] != quote {
-                raw.push(chars[end]);
-                end += 1;
-            }
-            if !raw.trim().is_empty() {
-                mentions.push(raw.trim().to_string());
-            }
-            idx = end.saturating_add(1);
-            continue;
-        }
-
-        let mut end = idx + 1;
-        let mut raw = String::new();
-        while end < chars.len() && !chars[end].is_whitespace() {
-            raw.push(chars[end]);
-            end += 1;
-        }
-        let trimmed = trim_unquoted_mention(&raw);
-        if !trimmed.is_empty() {
-            mentions.push(trimmed.to_string());
-        }
-        idx = end;
-    }
-
-    mentions
-}
-
-fn is_file_mention_start(chars: &[char], idx: usize) -> bool {
-    if idx == 0 {
-        return true;
-    }
-    chars
-        .get(idx.saturating_sub(1))
-        .is_some_and(|ch| ch.is_whitespace() || matches!(ch, '(' | '[' | '{' | '<' | '"' | '\''))
-}
-
-fn trim_unquoted_mention(raw: &str) -> &str {
-    let mut trimmed = raw.trim();
-    while trimmed.chars().count() > 1
-        && trimmed
-            .chars()
-            .last()
-            .is_some_and(|ch| matches!(ch, ',' | ';' | ':' | '!' | '?' | ')' | ']' | '}'))
-    {
-        trimmed = &trimmed[..trimmed.len() - trimmed.chars().last().unwrap().len_utf8()];
-    }
-    trimmed
-}
-
-fn resolve_mention_path(raw_path: &str, workspace: &Path) -> PathBuf {
-    let path = expand_mention_home(raw_path);
-    if path.is_absolute() {
-        path
-    } else {
-        workspace.join(path)
-    }
-}
-
-fn expand_mention_home(path: &str) -> PathBuf {
-    if path == "~" {
-        if let Some(home) = std::env::var_os("HOME") {
-            return PathBuf::from(home);
-        }
-    } else if let Some(rest) = path.strip_prefix("~/")
-        && let Some(home) = std::env::var_os("HOME")
-    {
-        return PathBuf::from(home).join(rest);
-    }
-    PathBuf::from(path)
-}
-
-fn render_file_mention_context(raw: &str, path: &Path, display_path: &str) -> String {
-    if !path.exists() {
-        return format!("<missing-file mention=\"@{raw}\" path=\"{display_path}\" />");
-    }
-    if path.is_dir() {
-        return render_directory_mention_context(raw, path, display_path);
-    }
-    if !path.is_file() {
-        return format!("<unsupported-path mention=\"@{raw}\" path=\"{display_path}\" />");
-    }
-    if is_media_path(path) {
-        return format!(
-            "<media-file mention=\"@{raw}\" path=\"{display_path}\">\nUse /attach {raw} when the intent is to attach this image or video to the next message.\n</media-file>"
-        );
-    }
-
-    match read_text_prefix(path) {
-        Ok((text, truncated)) => {
-            let truncated_attr = if truncated { " truncated=\"true\"" } else { "" };
-            format!(
-                "<file mention=\"@{raw}\" path=\"{display_path}\"{truncated_attr}>\n{text}\n</file>"
-            )
-        }
-        Err(err) => {
-            format!(
-                "<unreadable-file mention=\"@{raw}\" path=\"{display_path}\">\n{err}\n</unreadable-file>"
-            )
-        }
-    }
-}
-
-fn render_directory_mention_context(raw: &str, path: &Path, display_path: &str) -> String {
-    let entries = match std::fs::read_dir(path) {
-        Ok(entries) => entries,
-        Err(err) => {
-            return format!(
-                "<unreadable-directory mention=\"@{raw}\" path=\"{display_path}\">\n{err}\n</unreadable-directory>"
-            );
-        }
-    };
-
-    let mut names = entries
-        .filter_map(|entry| entry.ok())
-        .map(|entry| {
-            let marker = entry
-                .file_type()
-                .ok()
-                .filter(|ty| ty.is_dir())
-                .map_or("", |_| "/");
-            format!("{}{}", entry.file_name().to_string_lossy(), marker)
-        })
-        .collect::<Vec<_>>();
-    names.sort();
-    let total = names.len();
-    names.truncate(MAX_DIRECTORY_MENTION_ENTRIES);
-    let mut body = names.join("\n");
-    if total > MAX_DIRECTORY_MENTION_ENTRIES {
-        let omitted = total - MAX_DIRECTORY_MENTION_ENTRIES;
-        let _ = write!(body, "\n... {omitted} more entries");
-    }
-    format!("<directory mention=\"@{raw}\" path=\"{display_path}\">\n{body}\n</directory>")
-}
-
-fn read_text_prefix(path: &Path) -> std::io::Result<(String, bool)> {
-    let mut file = std::fs::File::open(path)?;
-    let mut buffer = Vec::new();
-    file.by_ref()
-        .take(MAX_MENTION_FILE_BYTES + 1)
-        .read_to_end(&mut buffer)?;
-    let truncated = buffer.len() as u64 > MAX_MENTION_FILE_BYTES;
-    if truncated {
-        buffer.truncate(MAX_MENTION_FILE_BYTES as usize);
-    }
-    if buffer.contains(&0) {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "file appears to be binary",
-        ));
-    }
-    let text = if truncated {
-        String::from_utf8_lossy(&buffer).to_string()
-    } else {
-        std::str::from_utf8(&buffer)
-            .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidData, "file is not UTF-8"))?
-            .to_string()
-    };
-    Ok((text, truncated))
-}
-
-fn is_media_path(path: &Path) -> bool {
-    let Some(ext) = path.extension().and_then(|ext| ext.to_str()) else {
-        return false;
-    };
-    matches!(
-        ext.to_ascii_lowercase().as_str(),
-        "png"
-            | "jpg"
-            | "jpeg"
-            | "gif"
-            | "webp"
-            | "bmp"
-            | "tif"
-            | "tiff"
-            | "ppm"
-            | "mp4"
-            | "mov"
-            | "m4v"
-            | "webm"
-            | "avi"
-            | "mkv"
-    )
 }
 
 async fn dispatch_user_message(
@@ -3338,16 +2918,28 @@ fn render_sidebar_subagents(f: &mut Frame, area: Rect, app: &App) {
             .iter()
             .filter(|agent| matches!(agent.status, SubAgentStatus::Running))
             .count();
-        lines.push(Line::from(vec![
-            Span::styled(
-                format!("{running} running"),
-                Style::default().fg(palette::DEEPSEEK_SKY).bold(),
-            ),
-            Span::styled(
-                format!(" / {}", app.subagent_cache.len()),
-                Style::default().fg(palette::TEXT_MUTED),
-            ),
-        ]));
+        let done = app.subagent_cache.len().saturating_sub(running);
+        // When agents have all finished, "0 running / 1" reads as broken.
+        // Switch to "1 done" once nothing is in flight; only show the
+        // running/total split while activity is live.
+        let header = if running > 0 {
+            vec![
+                Span::styled(
+                    format!("{running} running"),
+                    Style::default().fg(palette::DEEPSEEK_SKY).bold(),
+                ),
+                Span::styled(
+                    format!(" / {}", app.subagent_cache.len()),
+                    Style::default().fg(palette::TEXT_MUTED),
+                ),
+            ]
+        } else {
+            vec![Span::styled(
+                format!("{done} done"),
+                Style::default().fg(palette::STATUS_SUCCESS),
+            )]
+        };
+        lines.push(Line::from(header));
 
         let usable_rows = area.height.saturating_sub(3) as usize;
         let max_agents = usable_rows.saturating_sub(lines.len());
@@ -3903,14 +3495,13 @@ fn footer_auxiliary_spans(app: &App, max_width: usize) -> Vec<Span<'static>> {
 }
 
 fn footer_coherence_spans(app: &App) -> Vec<Span<'static>> {
-    // Only show coherence when it's NOT healthy — normal operation
-    // needs no label; anomalies stand out. Renamed "crowded" to
-    // "high load" because the capacity model measures tool/action
-    // complexity, not context-window fullness, and "crowded" is
-    // confusing when the header shows 6% context.
+    // Only surface coherence when the engine is actively intervening — the
+    // user-facing signal is "we're doing something different now," not
+    // "your conversation is getting complex," which the context-percent
+    // header already covers. `GettingCrowded` is just a soft hint, so we
+    // suppress it; the active interventions get their own visible label.
     let (label, color) = match app.coherence_state {
-        CoherenceState::Healthy => return Vec::new(),
-        CoherenceState::GettingCrowded => ("high load", palette::STATUS_WARNING),
+        CoherenceState::Healthy | CoherenceState::GettingCrowded => return Vec::new(),
         CoherenceState::RefreshingContext => ("refreshing context", palette::STATUS_WARNING),
         CoherenceState::VerifyingRecentWork => ("verifying", palette::DEEPSEEK_SKY),
         CoherenceState::ResettingPlan => ("resetting plan", palette::STATUS_ERROR),
