@@ -832,6 +832,100 @@ impl Engine {
                     continue;
                 }
 
+                // Sub-agent completion handoff (issue #756). The model finished
+                // streaming with no tool calls — but if it has direct children
+                // still running (or completions queued from children that
+                // finished while we were inferring), surface their
+                // `<deepseek:subagent.done>` sentinels into the transcript and
+                // resume instead of ending the turn. This fulfils the contract
+                // already documented in `prompts/base.md`: the parent is
+                // promised it'll see the sentinel when a child finishes.
+                let mut completions: Vec<crate::tools::subagent::SubAgentCompletion> = Vec::new();
+                while let Ok(c) = self.rx_subagent_completion.try_recv() {
+                    completions.push(c);
+                }
+                if completions.is_empty() {
+                    let running = {
+                        let mgr = self.subagent_manager.read().await;
+                        mgr.running_count()
+                    };
+                    if running > 0 {
+                        let _ = self
+                            .tx_event
+                            .send(Event::status(format!(
+                                "Waiting on {running} sub-agent(s) to complete..."
+                            )))
+                            .await;
+                        tokio::select! {
+                            biased;
+                            () = self.cancel_token.cancelled() => {
+                                let _ = self
+                                    .tx_event
+                                    .send(Event::status(
+                                        "Request cancelled while waiting for sub-agents",
+                                    ))
+                                    .await;
+                                return (TurnOutcomeStatus::Interrupted, None);
+                            }
+                            Some(c) = self.rx_subagent_completion.recv() => {
+                                completions.push(c);
+                                while let Ok(extra) = self.rx_subagent_completion.try_recv() {
+                                    completions.push(extra);
+                                }
+                            }
+                            Some(steer) = self.rx_steer.recv() => {
+                                let trimmed = steer.trim().to_string();
+                                if !trimmed.is_empty() {
+                                    self.session
+                                        .working_set
+                                        .observe_user_message(&trimmed, &self.session.workspace);
+                                    self.add_session_message(Message {
+                                        role: "user".to_string(),
+                                        content: vec![ContentBlock::Text {
+                                            text: trimmed.clone(),
+                                            cache_control: None,
+                                        }],
+                                    })
+                                    .await;
+                                    let _ = self
+                                        .tx_event
+                                        .send(Event::status(format!(
+                                            "Steer input accepted: {}",
+                                            summarize_text(&trimmed, 120)
+                                        )))
+                                        .await;
+                                }
+                                turn.next_step();
+                                continue;
+                            }
+                        }
+                    }
+                }
+                if !completions.is_empty() {
+                    let count = completions.len();
+                    for c in completions {
+                        self.session
+                            .working_set
+                            .observe_user_message(&c.payload, &self.session.workspace);
+                        self.add_session_message(Message {
+                            role: "user".to_string(),
+                            content: vec![ContentBlock::Text {
+                                text: c.payload,
+                                cache_control: None,
+                            }],
+                        })
+                        .await;
+                    }
+                    let _ = self
+                        .tx_event
+                        .send(Event::status(format!(
+                            "Resuming turn with {count} sub-agent completion(s)"
+                        )))
+                        .await;
+                    turn.next_step();
+                    continue;
+                }
+
                 // Inline ```repl execution — paper-spec RLM integration.
                 if has_sendable_assistant_content
                     && crate::repl::sandbox::has_repl_block(&current_text_visible)
