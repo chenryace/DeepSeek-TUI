@@ -2,8 +2,9 @@
 //!
 //! Provides a small abstraction (`KeyringStore`) plus a default
 //! implementation backed by the OS keyring (`DefaultKeyringStore`),
-//! a file-based fallback for headless Linux (`FileKeyringStore`), and
-//! an in-memory store for tests (`InMemoryKeyringStore`).
+//! a file-based fallback for headless or unsupported platforms
+//! (`FileKeyringStore`), and an in-memory store for tests
+//! (`InMemoryKeyringStore`).
 //!
 //! Higher-level lookup through [`Secrets::resolve`] checks the keyring first
 //! and falls back to environment variables. Config-file precedence lives in the
@@ -60,7 +61,9 @@ pub trait KeyringStore: Send + Sync {
 }
 
 /// OS keyring backend (macOS Keychain, Windows Credential Manager,
-/// Linux Secret Service / kwallet).
+/// Linux Secret Service / kwallet). On platforms without a configured
+/// native keyring dependency, probing this backend returns an unsupported
+/// error so [`Secrets::auto_detect`] can fall back to [`FileKeyringStore`].
 #[derive(Debug, Clone)]
 pub struct DefaultKeyringStore {
     /// Keyring service name (defaults to [`DEFAULT_SERVICE`]).
@@ -85,62 +88,99 @@ impl DefaultKeyringStore {
     /// Probe the OS keyring without writing anything. Returns `Ok(())` if
     /// a backend is reachable, otherwise an error describing why not.
     pub fn probe(&self) -> Result<(), SecretsError> {
-        // `Entry::new` is enough to validate the native macOS/Windows
-        // backend path. Avoid a dummy read there because it can trigger
-        // a second user-visible Keychain/Credential Manager access before
-        // the real provider key lookup.
-        let entry = keyring::Entry::new(&self.service, "__probe__")
-            .map_err(|err| SecretsError::Keyring(err.to_string()))?;
-        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
         {
-            let _ = entry;
-            Ok(())
+            // `Entry::new` is enough to validate the native macOS/Windows
+            // backend path. Avoid a dummy read there because it can trigger
+            // a second user-visible Keychain/Credential Manager access before
+            // the real provider key lookup.
+            let entry = keyring::Entry::new(&self.service, "__probe__")
+                .map_err(|err| SecretsError::Keyring(err.to_string()))?;
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
+            {
+                let _ = entry;
+                Ok(())
+            }
+            #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+            match entry.get_password() {
+                Ok(_) | Err(keyring::Error::NoEntry) => Ok(()),
+                Err(keyring::Error::PlatformFailure(err)) => {
+                    Err(SecretsError::Keyring(format!("platform failure: {err}")))
+                }
+                Err(keyring::Error::NoStorageAccess(err)) => {
+                    Err(SecretsError::Keyring(format!("no storage access: {err}")))
+                }
+                Err(other) => Err(SecretsError::Keyring(other.to_string())),
+            }
         }
-        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-        match entry.get_password() {
-            Ok(_) | Err(keyring::Error::NoEntry) => Ok(()),
-            Err(keyring::Error::PlatformFailure(err)) => {
-                Err(SecretsError::Keyring(format!("platform failure: {err}")))
-            }
-            Err(keyring::Error::NoStorageAccess(err)) => {
-                Err(SecretsError::Keyring(format!("no storage access: {err}")))
-            }
-            Err(other) => Err(SecretsError::Keyring(other.to_string())),
+        #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+        {
+            let _ = &self.service;
+            Err(SecretsError::Keyring(unsupported_keyring_message()))
         }
     }
 }
 
 impl KeyringStore for DefaultKeyringStore {
     fn get(&self, key: &str) -> Result<Option<String>, SecretsError> {
-        let entry = keyring::Entry::new(&self.service, key)
-            .map_err(|err| SecretsError::Keyring(err.to_string()))?;
-        match entry.get_password() {
-            Ok(value) => Ok(Some(value)),
-            Err(keyring::Error::NoEntry) => Ok(None),
-            Err(err) => Err(SecretsError::Keyring(err.to_string())),
+        #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
+        {
+            let entry = keyring::Entry::new(&self.service, key)
+                .map_err(|err| SecretsError::Keyring(err.to_string()))?;
+            match entry.get_password() {
+                Ok(value) => Ok(Some(value)),
+                Err(keyring::Error::NoEntry) => Ok(None),
+                Err(err) => Err(SecretsError::Keyring(err.to_string())),
+            }
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+        {
+            let _ = key;
+            Err(SecretsError::Keyring(unsupported_keyring_message()))
         }
     }
 
     fn set(&self, key: &str, value: &str) -> Result<(), SecretsError> {
-        let entry = keyring::Entry::new(&self.service, key)
-            .map_err(|err| SecretsError::Keyring(err.to_string()))?;
-        entry
-            .set_password(value)
-            .map_err(|err| SecretsError::Keyring(err.to_string()))
+        #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
+        {
+            let entry = keyring::Entry::new(&self.service, key)
+                .map_err(|err| SecretsError::Keyring(err.to_string()))?;
+            entry
+                .set_password(value)
+                .map_err(|err| SecretsError::Keyring(err.to_string()))
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+        {
+            let _ = (key, value);
+            Err(SecretsError::Keyring(unsupported_keyring_message()))
+        }
     }
 
     fn delete(&self, key: &str) -> Result<(), SecretsError> {
-        let entry = keyring::Entry::new(&self.service, key)
-            .map_err(|err| SecretsError::Keyring(err.to_string()))?;
-        match entry.delete_credential() {
-            Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
-            Err(err) => Err(SecretsError::Keyring(err.to_string())),
+        #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
+        {
+            let entry = keyring::Entry::new(&self.service, key)
+                .map_err(|err| SecretsError::Keyring(err.to_string()))?;
+            match entry.delete_credential() {
+                Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+                Err(err) => Err(SecretsError::Keyring(err.to_string())),
+            }
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+        {
+            let _ = key;
+            Err(SecretsError::Keyring(unsupported_keyring_message()))
         }
     }
 
     fn backend_name(&self) -> &'static str {
         "system keyring"
     }
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+fn unsupported_keyring_message() -> String {
+    "system keyring backend is unsupported on this platform".to_string()
 }
 
 /// In-memory keyring (tests only).
