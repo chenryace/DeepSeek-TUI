@@ -1448,10 +1448,20 @@ impl Engine {
         }
 
         match mode {
-            // Plan mode is read-only investigation; the shell tool is not
-            // registered, so leaving the sandbox policy at the seatbelt-strict
-            // default is fine.
-            AppMode::Plan => ctx,
+            // Plan mode is read-only investigation. Shell tools can still be
+            // available for read-only local inspection, but outbound network
+            // remains sandbox-blocked; attach an explicit hint so network
+            // command failures do not look like DNS/proxy problems.
+            AppMode::Plan => ctx
+                .with_elevated_sandbox_policy(crate::sandbox::SandboxPolicy::WorkspaceWrite {
+                    writable_roots: vec![self.session.workspace.clone()],
+                    network_access: false,
+                    exclude_tmpdir: false,
+                    exclude_slash_tmp: false,
+                })
+                .with_shell_network_denied_hint(
+                    "Shell command blocked: Plan mode runs shell commands in a network-restricted sandbox. Use fetch_url or code_execution for network access, or switch to Agent mode (`/agent`) before retrying shell network commands.",
+                ),
             // Agent registers the shell tool and runs each command through
             // the per-mode sandbox + per-tool approval flow. The sandbox
             // default would deny all outbound network — including DNS —

@@ -500,13 +500,20 @@ fn agent_and_yolo_modes_elevate_shell_sandbox_to_allow_network() {
         "Yolo mode must use DangerFullAccess (no sandbox); got {yolo_policy:?}",
     );
 
-    // Plan mode is read-only investigation and does not register the shell
-    // tool, so it intentionally leaves the policy at the strict default.
+    // Plan mode can still expose shell tools for local read-only inspection,
+    // but it keeps outbound network blocked and attaches an explicit hint so
+    // network command failures are not mistaken for DNS/proxy issues.
+    let plan_ctx = engine.build_tool_context(AppMode::Plan, false);
+    let plan_policy = plan_ctx
+        .elevated_sandbox_policy
+        .as_ref()
+        .expect("Plan mode should make the shell sandbox policy explicit");
+    assert!(!plan_policy.has_network_access());
     assert!(
-        engine
-            .build_tool_context(AppMode::Plan, false)
-            .elevated_sandbox_policy
-            .is_none(),
+        plan_ctx
+            .shell_network_denied_hint
+            .as_deref()
+            .is_some_and(|hint| hint.contains("Plan mode")),
     );
 }
 
