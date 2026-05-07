@@ -58,6 +58,7 @@ mod schema_migration;
 mod seam_manager;
 mod session_manager;
 mod settings;
+mod skill_state;
 mod skills;
 mod snapshot;
 mod task_manager;

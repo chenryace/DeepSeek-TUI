@@ -22,6 +22,11 @@ next round of TUI fixes can be verified against real terminal behaviour.
   resize, and assert on the parsed terminal frame plus the workspace
   filesystem. Initial scenarios cover boot smoke and the #1073 paste regression.
   Adding-a-scenario walkthrough lives in `crates/tui/tests/support/qa_harness/README.md`.
+- **Whalescale desktop runtime bridge** — the local runtime API now exposes
+  `POST /v1/approvals/{id}`, `GET /v1/runtime/info`, `enabled` flags on
+  `GET /v1/skills`, and `POST /v1/skills/{name}` toggles. Runtime thread
+  events also carry `agent_reasoning` items so desktop clients can render
+  thinking separately from assistant text.
 
 ### Changed
 - **`deepseek-cn` provider preset now defaults to the official

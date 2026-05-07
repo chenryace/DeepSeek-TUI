@@ -33,11 +33,13 @@ use crate::automation_manager::{
 use crate::config::{Config, DEFAULT_TEXT_MODEL};
 use crate::mcp::{McpConfig, McpPool};
 use crate::runtime_threads::{
-    CompactThreadRequest, CreateThreadRequest, RuntimeThreadManager, RuntimeThreadManagerConfig,
-    SharedRuntimeThreadManager, StartTurnRequest, SteerTurnRequest, ThreadDetail, ThreadListFilter,
-    ThreadRecord, TurnItemKind, TurnRecord, UpdateThreadRequest, UsageGroupBy,
+    CompactThreadRequest, CreateThreadRequest, ExternalApprovalDecision, RuntimeThreadManager,
+    RuntimeThreadManagerConfig, SharedRuntimeThreadManager, StartTurnRequest, SteerTurnRequest,
+    ThreadDetail, ThreadListFilter, ThreadRecord, TurnItemKind, TurnRecord, UpdateThreadRequest,
+    UsageGroupBy,
 };
 use crate::session_manager::{SavedSession, SessionManager, SessionMetadata, default_sessions_dir};
+use crate::skill_state::SkillStateStore;
 use crate::skills::SkillRegistry;
 use crate::task_manager::{
     NewTaskRequest, SharedTaskManager, TaskManager, TaskManagerConfig, TaskRecord, TaskSummary,
@@ -54,6 +56,10 @@ pub struct RuntimeApiState {
     mcp_config_path: PathBuf,
     automations: SharedAutomationManager,
     runtime_token: Option<String>,
+    skill_state: Arc<Mutex<SkillStateStore>>,
+    auth_required: bool,
+    bind_host: String,
+    bind_port: u16,
 }
 
 #[derive(Debug, Clone)]
@@ -207,6 +213,7 @@ struct SkillEntry {
     name: String,
     description: String,
     path: PathBuf,
+    enabled: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -214,6 +221,40 @@ struct SkillsResponse {
     directory: PathBuf,
     warnings: Vec<String>,
     skills: Vec<SkillEntry>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SetSkillEnabledRequest {
+    enabled: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct SetSkillEnabledResponse {
+    name: String,
+    enabled: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct DecideApprovalBody {
+    decision: String,
+    #[serde(default)]
+    remember: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct DecideApprovalResponse {
+    ok: bool,
+    approval_id: String,
+    decision: String,
+    delivered: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct RuntimeInfoResponse {
+    bind_host: String,
+    port: u16,
+    auth_required: bool,
+    version: &'static str,
 }
 
 #[derive(Debug, Serialize)]
@@ -313,6 +354,13 @@ pub async fn run_http_server(
         .or_else(|| std::env::var("DEEPSEEK_RUNTIME_TOKEN").ok())
         .filter(|token| !token.trim().is_empty());
     let auth_enabled = runtime_token.is_some();
+    let skill_state = SkillStateStore::load_default().unwrap_or_else(|err| {
+        tracing::warn!(
+            "Failed to load skills_state.toml ({}); treating all skills as enabled",
+            err
+        );
+        SkillStateStore::default()
+    });
     let state = RuntimeApiState {
         config: config.clone(),
         workspace,
@@ -323,6 +371,10 @@ pub async fn run_http_server(
         mcp_config_path: config.mcp_config_path(),
         automations,
         runtime_token,
+        skill_state: Arc::new(Mutex::new(skill_state)),
+        auth_required: auth_enabled,
+        bind_host: options.host.clone(),
+        bind_port: options.port,
     };
     let app = build_router(state);
 
@@ -334,7 +386,26 @@ pub async fn run_http_server(
         .with_context(|| format!("Failed to bind {addr}"))?;
 
     println!("Runtime API listening on http://{addr}");
-    println!("Security: this server is local-first. Do not expose it to untrusted networks.");
+    let is_loopback = options.host == "127.0.0.1" || options.host == "::1";
+    if is_loopback {
+        println!("Security: this server is local-first. Do not expose it to untrusted networks.");
+    } else {
+        println!(
+            "Security: bound to {host}; reachable from any peer that can route to this address.",
+            host = options.host
+        );
+        if !auth_enabled {
+            println!(
+                "  WARNING: --auth-token (or DEEPSEEK_RUNTIME_TOKEN) is unset. Anyone on the network can call /v1/* without authentication."
+            );
+        }
+        println!(
+            "  /v1/runtime/info reports bind_host={host:?}, port={port}, auth_required={auth}.",
+            host = options.host,
+            port = options.port,
+            auth = auth_enabled,
+        );
+    }
     if auth_enabled {
         println!("Runtime API auth: bearer token required for /v1/* routes.");
     }
@@ -372,10 +443,12 @@ pub fn build_router(state: RuntimeApiState) -> Router {
         )
         .route("/v1/threads/{id}/compact", post(compact_thread))
         .route("/v1/threads/{id}/events", get(stream_thread_events))
+        .route("/v1/approvals/{approval_id}", post(decide_approval))
         .route("/v1/tasks", get(list_tasks).post(create_task))
         .route("/v1/tasks/{id}", get(get_task))
         .route("/v1/tasks/{id}/cancel", post(cancel_task))
         .route("/v1/skills", get(list_skills))
+        .route("/v1/skills/{name}", post(set_skill_enabled))
         .route("/v1/apps/mcp/servers", get(list_mcp_servers))
         .route("/v1/apps/mcp/tools", get(list_mcp_tools))
         .route(
@@ -400,6 +473,7 @@ pub fn build_router(state: RuntimeApiState) -> Router {
 
     Router::new()
         .route("/health", get(health))
+        .route("/v1/runtime/info", get(runtime_info))
         .merge(api_routes)
         .layer(cors_layer(&state.cors_origins))
         .with_state(state)
@@ -777,6 +851,7 @@ async fn list_skills(
 ) -> Result<Json<SkillsResponse>, ApiError> {
     let skills_dir = resolve_skills_dir(&state.config, &state.workspace);
     let registry = SkillRegistry::discover(&skills_dir);
+    let skill_state = state.skill_state.lock().await;
     let skills = registry
         .list()
         .iter()
@@ -784,6 +859,7 @@ async fn list_skills(
             name: skill.name.clone(),
             description: skill.description.clone(),
             path: skills_dir.join(&skill.name).join("SKILL.md"),
+            enabled: skill_state.is_enabled(&skill.name),
         })
         .collect();
     Ok(Json(SkillsResponse {
@@ -791,6 +867,74 @@ async fn list_skills(
         warnings: registry.warnings().to_vec(),
         skills,
     }))
+}
+
+async fn set_skill_enabled(
+    State(state): State<RuntimeApiState>,
+    Path(name): Path<String>,
+    Json(req): Json<SetSkillEnabledRequest>,
+) -> Result<Json<SetSkillEnabledResponse>, ApiError> {
+    let skills_dir = resolve_skills_dir(&state.config, &state.workspace);
+    let registry = SkillRegistry::discover(&skills_dir);
+    let exists = registry.list().iter().any(|skill| skill.name == name);
+    if !exists {
+        return Err(ApiError::not_found(format!(
+            "skill '{name}' not found under {}",
+            skills_dir.display()
+        )));
+    }
+
+    let mut store = state.skill_state.lock().await;
+    store
+        .set_enabled(&name, req.enabled)
+        .map_err(|err| ApiError::internal(format!("persist skill state: {err}")))?;
+    Ok(Json(SetSkillEnabledResponse {
+        name,
+        enabled: req.enabled,
+    }))
+}
+
+async fn decide_approval(
+    State(state): State<RuntimeApiState>,
+    Path(approval_id): Path<String>,
+    Json(req): Json<DecideApprovalBody>,
+) -> Result<Json<DecideApprovalResponse>, ApiError> {
+    let decision = match req.decision.as_str() {
+        "allow" => ExternalApprovalDecision::Allow {
+            remember: req.remember,
+        },
+        "deny" => ExternalApprovalDecision::Deny {
+            remember: req.remember,
+        },
+        other => {
+            return Err(ApiError::bad_request(format!(
+                "invalid decision '{other}'; expected \"allow\" or \"deny\""
+            )));
+        }
+    };
+    let delivered = state
+        .runtime_threads
+        .deliver_external_approval(&approval_id, decision);
+    if !delivered {
+        return Err(ApiError::not_found(format!(
+            "no pending approval with id '{approval_id}'"
+        )));
+    }
+    Ok(Json(DecideApprovalResponse {
+        ok: true,
+        approval_id,
+        decision: req.decision,
+        delivered,
+    }))
+}
+
+async fn runtime_info(State(state): State<RuntimeApiState>) -> Json<RuntimeInfoResponse> {
+    Json(RuntimeInfoResponse {
+        bind_host: state.bind_host.clone(),
+        port: state.bind_port,
+        auth_required: state.auth_required,
+        version: env!("CARGO_PKG_VERSION"),
+    })
 }
 
 async fn list_mcp_servers(
@@ -1769,6 +1913,7 @@ mod tests {
         )?));
         runtime_threads.attach_automation_manager(automations.clone());
 
+        let auth_required = runtime_token.is_some();
         let state = RuntimeApiState {
             config: Config::default(),
             workspace: PathBuf::from("."),
@@ -1779,6 +1924,12 @@ mod tests {
             mcp_config_path: root.join("mcp.json"),
             automations,
             runtime_token,
+            skill_state: Arc::new(Mutex::new(
+                SkillStateStore::load_from(root.join("skills_state.toml")).unwrap_or_default(),
+            )),
+            auth_required,
+            bind_host: "127.0.0.1".to_string(),
+            bind_port: 0,
         };
         let app = build_router(state);
         let listener = match TcpListener::bind("127.0.0.1:0").await {
@@ -3319,6 +3470,130 @@ mod tests {
             .send()
             .await?;
         assert_eq!(inverted.status(), StatusCode::BAD_REQUEST);
+
+        handle.abort();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn runtime_info_reports_bind_state() -> Result<()> {
+        let Some((addr, _runtime_threads, handle)) = spawn_test_server().await? else {
+            return Ok(());
+        };
+        let client = reqwest::Client::new();
+        let info: serde_json::Value = client
+            .get(format!("http://{addr}/v1/runtime/info"))
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+        assert_eq!(info["bind_host"], "127.0.0.1");
+        assert_eq!(info["auth_required"], false);
+        assert!(info["version"].is_string());
+
+        handle.abort();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn decide_approval_404s_when_nothing_pending() -> Result<()> {
+        let Some((addr, _runtime_threads, handle)) = spawn_test_server().await? else {
+            return Ok(());
+        };
+        let client = reqwest::Client::new();
+        let resp = client
+            .post(format!("http://{addr}/v1/approvals/no_such_id"))
+            .json(&json!({ "decision": "allow" }))
+            .send()
+            .await?;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+        handle.abort();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn decide_approval_400s_on_bad_decision() -> Result<()> {
+        let Some((addr, _runtime_threads, handle)) = spawn_test_server().await? else {
+            return Ok(());
+        };
+        let client = reqwest::Client::new();
+        let resp = client
+            .post(format!("http://{addr}/v1/approvals/whatever"))
+            .json(&json!({ "decision": "yolo" }))
+            .send()
+            .await?;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        handle.abort();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn decide_approval_delivers_to_runtime() -> Result<()> {
+        let Some((addr, runtime_threads, handle)) = spawn_test_server().await? else {
+            return Ok(());
+        };
+        let client = reqwest::Client::new();
+        let rx = runtime_threads.register_pending_approval_for_test("ext_id");
+
+        let resp = client
+            .post(format!("http://{addr}/v1/approvals/ext_id"))
+            .json(&json!({ "decision": "allow", "remember": false }))
+            .send()
+            .await?;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body: serde_json::Value = resp.json().await?;
+        assert_eq!(body["ok"], true);
+        assert_eq!(body["decision"], "allow");
+        assert_eq!(body["delivered"], true);
+
+        let received = tokio::time::timeout(Duration::from_secs(1), rx).await??;
+        assert_eq!(
+            received,
+            ExternalApprovalDecision::Allow { remember: false }
+        );
+
+        handle.abort();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn skills_endpoint_includes_enabled_field() -> Result<()> {
+        let Some((addr, _runtime_threads, handle)) = spawn_test_server().await? else {
+            return Ok(());
+        };
+        let client = reqwest::Client::new();
+        let body: serde_json::Value = client
+            .get(format!("http://{addr}/v1/skills"))
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+        if let Some(skills) = body["skills"].as_array() {
+            for skill in skills {
+                assert!(skill.get("enabled").is_some());
+            }
+        }
+
+        handle.abort();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn skill_toggle_endpoint_404s_for_unknown_skill() -> Result<()> {
+        let Some((addr, _runtime_threads, handle)) = spawn_test_server().await? else {
+            return Ok(());
+        };
+        let client = reqwest::Client::new();
+        let resp = client
+            .post(format!("http://{addr}/v1/skills/no-such-skill"))
+            .json(&json!({ "enabled": false }))
+            .send()
+            .await?;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 
         handle.abort();
         Ok(())
