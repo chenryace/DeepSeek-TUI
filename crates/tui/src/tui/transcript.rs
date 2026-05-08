@@ -910,4 +910,66 @@ mod tests {
             );
         }
     }
+
+    /// Simulate a long, complex conversation (thinking + multi-line tool output +
+    /// tool headers with multiple decorative spans) and report the memory
+    /// consumed by `rail_prefix_widths`. This is informational — the assertion
+    /// only fails if the per-line overhead exceeds a generous bound.
+    #[test]
+    fn rail_prefix_widths_memory_overhead_complex_session() {
+        let mut cells: Vec<HistoryCell> = Vec::new();
+        // Build ~60 turns covering the typical deep-reasoning workflow:
+        // user → thinking (5-15 lines) → assistant → tool → tool output →
+        // thinking → assistant → ... repeat.
+        for i in 0..30 {
+            cells.push(user_cell(&format!("complex query {i} about system design")));
+            cells.push(HistoryCell::Thinking {
+                content: format!(
+                    "line A\nline B\nline C\nline D\nline E\nline F\nline G\nline H\nline I\nline J"
+                ),
+                streaming: false,
+                duration_secs: Some(3.5),
+            });
+            cells.push(assistant_cell(
+                &format!("response {i} with multi-line\ntext content spanning\nseveral lines"),
+                false,
+            ));
+            cells.push(exec_tool_cell(&format!(
+                "cargo test --package my_crate -- --nocapture 2>&1 | head -40"
+            )));
+            // Insert a second tool so adjacent tool cells merge into a railed group.
+            cells.push(exec_tool_cell(&format!("git diff --stat HEAD~{i}")));
+        }
+        let revisions: Vec<u64> = (0..cells.len()).map(|i| i as u64 + 1).collect();
+
+        let mut cache = TranscriptViewCache::new();
+        cache.ensure(&cells, &revisions, 80, TranscriptRenderOptions::default());
+
+        let total_lines = cache.total_lines();
+        let pw_len = cache.rail_prefix_widths.len();
+        let pw_cap = cache.rail_prefix_widths.capacity();
+        // The Vec's inlined buffer on most platforms is small; capacity
+        // should be >= len. Both must equal total_lines.
+        assert_eq!(pw_len, total_lines);
+        assert!(pw_cap >= pw_len);
+
+        let memory_bytes = pw_cap * std::mem::size_of::<usize>();
+        let memory_kb = memory_bytes as f64 / 1024.0;
+        // Each usize is 8 bytes on 64-bit. Even with 100k lines this stays
+        // under 1 MB.
+        let kbytes_per_1k_lines = (memory_bytes as f64 / total_lines as f64) * 1000.0 / 1024.0;
+
+        eprintln!("=== rail_prefix_widths memory (complex session) ===");
+        eprintln!("  total_lines:       {total_lines}");
+        eprintln!("  vec len:           {pw_len}");
+        eprintln!("  vec capacity:      {pw_cap}");
+        eprintln!("  memory (bytes):    {memory_bytes}");
+        eprintln!("  memory (KB):       {memory_kb:.2}");
+        eprintln!("  KB per 1k lines:   {kbytes_per_1k_lines:.2}");
+        eprintln!("  lines × 8 bytes:   {} KB", total_lines * 8 / 1024);
+
+        // Sanity: per-line overhead must be reasonable.
+        assert!(memory_kb < 1024.0, "rail_prefix_widths memory unexpectedly large: {memory_kb:.1} KB");
+        eprintln!("  ✓ well under 1 MB even for very long sessions");
+    }
 }
