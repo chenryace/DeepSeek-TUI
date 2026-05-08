@@ -150,7 +150,8 @@ struct Cli {
     #[arg(long = "no-alt-screen", hide = true)]
     no_alt_screen: bool,
 
-    /// Enable TUI mouse capture for internal scrolling and transcript selection
+    /// Enable TUI mouse capture for internal scrolling, transcript selection,
+    /// and scrollbar dragging
     /// (default off on Windows)
     #[arg(long = "mouse-capture", conflicts_with = "no_mouse_capture")]
     mouse_capture: bool,
