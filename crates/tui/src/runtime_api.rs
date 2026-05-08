@@ -1602,30 +1602,23 @@ fn run_git(workspace: &std::path::Path, args: &[&str]) -> Option<String> {
 }
 
 fn resolve_skills_dir(config: &Config, workspace: &std::path::Path) -> PathBuf {
-    let agents_skills = workspace.join(".agents").join("skills");
-    if agents_skills.exists() {
-        return agents_skills;
-    }
-    let local_skills = workspace.join("skills");
-    if local_skills.exists() {
-        return local_skills;
+    let workspace = fs::canonicalize(workspace).unwrap_or_else(|_| workspace.to_path_buf());
+    for candidate in [
+        workspace.join(".agents").join("skills"),
+        workspace.join("skills"),
+    ] {
+        if let Ok(candidate) = fs::canonicalize(candidate)
+            && candidate.is_dir()
+        {
+            return candidate;
+        }
     }
     config.skills_dir()
 }
 
 fn load_mcp_config_or_default(path: &std::path::Path) -> Result<McpConfig, ApiError> {
-    if !path.exists() {
-        return Ok(McpConfig::default());
-    }
-    let raw = fs::read_to_string(path).map_err(|e| {
-        ApiError::internal(format!("Failed to read MCP config {}: {e}", path.display()))
-    })?;
-    serde_json::from_str::<McpConfig>(&raw).map_err(|e| {
-        ApiError::internal(format!(
-            "Failed to parse MCP config {}: {e}",
-            path.display()
-        ))
-    })
+    crate::mcp::load_config(path)
+        .map_err(|e| ApiError::internal(format!("Failed to load MCP config: {e:#}")))
 }
 
 #[derive(Debug, Deserialize)]
@@ -3046,11 +3039,10 @@ mod tests {
         let root = std::env::temp_dir().join(format!("deepseek-session-resume-{}", Uuid::new_v4()));
         let sessions_dir = root.join("sessions");
         fs::create_dir_all(&sessions_dir)?;
-        let session_id = "sess_test_resume";
         let session = json!({
             "schema_version": 1,
             "metadata": {
-                "id": session_id,
+                "id": "sess_test_resume",
                 "title": "Test resume session",
                 "created_at": "2025-01-01T00:00:00Z",
                 "updated_at": "2025-01-01T00:10:00Z",
@@ -3073,7 +3065,7 @@ mod tests {
             "system_prompt": null
         });
         fs::write(
-            sessions_dir.join(format!("{session_id}.json")),
+            sessions_dir.join("sess_test_resume.json"),
             serde_json::to_string_pretty(&session)?,
         )?;
 
@@ -3086,14 +3078,14 @@ mod tests {
 
         let resp = client
             .post(format!(
-                "http://{addr}/v1/sessions/{session_id}/resume-thread"
+                "http://{addr}/v1/sessions/sess_test_resume/resume-thread"
             ))
             .json(&json!({ "model": "deepseek-v4-pro" }))
             .send()
             .await?;
         assert_eq!(resp.status(), StatusCode::CREATED);
         let resumed: serde_json::Value = resp.json().await?;
-        assert_eq!(resumed["session_id"], session_id);
+        assert_eq!(resumed["session_id"], "sess_test_resume");
         assert_eq!(resumed["message_count"], 2);
 
         let thread_id = resumed["thread_id"]

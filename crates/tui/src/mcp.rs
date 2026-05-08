@@ -7,7 +7,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::fs;
-use std::path::Path;
+use std::path::{Component, Path};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
@@ -23,6 +23,19 @@ use crate::utils::write_atomic;
 
 /// Bytes of a non-2xx response body to surface in connection errors.
 const ERROR_BODY_PREVIEW_BYTES: usize = 200;
+
+fn validate_mcp_config_path(path: &Path) -> Result<()> {
+    if path.as_os_str().is_empty() {
+        anyhow::bail!("MCP config path cannot be empty");
+    }
+    if path
+        .components()
+        .any(|component| matches!(component, Component::ParentDir))
+    {
+        anyhow::bail!("MCP config path cannot contain '..' components");
+    }
+    Ok(())
+}
 
 /// Mask a URL so any embedded credentials in the userinfo portion (e.g.
 /// `https://user:secret@host`) are replaced with `***`. Failures fall back to
@@ -1046,6 +1059,7 @@ impl McpPool {
 
     /// Create a pool from a configuration file path
     pub fn from_config_path(path: &std::path::Path) -> Result<Self> {
+        validate_mcp_config_path(path)?;
         let config = if path.exists() {
             let contents = fs::read_to_string(path)
                 .with_context(|| format!("Failed to read MCP config: {}", path.display()))?;
@@ -1605,6 +1619,7 @@ pub struct McpManagerSnapshot {
 }
 
 pub fn load_config(path: &Path) -> Result<McpConfig> {
+    validate_mcp_config_path(path)?;
     if !path.exists() {
         return Ok(McpConfig::default());
     }
@@ -1615,6 +1630,7 @@ pub fn load_config(path: &Path) -> Result<McpConfig> {
 }
 
 pub fn save_config(path: &Path, cfg: &McpConfig) -> Result<()> {
+    validate_mcp_config_path(path)?;
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).with_context(|| {
             format!("Failed to create MCP config directory {}", parent.display())
@@ -1969,6 +1985,15 @@ mod tests {
         assert_eq!(snapshot.servers[0].name, "disabled");
         assert!(!snapshot.servers[0].enabled);
         assert_eq!(snapshot.servers[0].error.as_deref(), Some("disabled"));
+    }
+
+    #[test]
+    fn test_mcp_config_rejects_traversal_path() {
+        let err = load_config(Path::new("../mcp.json")).expect_err("traversal path should fail");
+        assert!(
+            format!("{err:#}").contains("cannot contain '..'"),
+            "got: {err:#}"
+        );
     }
 
     #[test]
