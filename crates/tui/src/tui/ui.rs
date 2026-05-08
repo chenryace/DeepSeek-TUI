@@ -7508,6 +7508,14 @@ fn handle_mouse_event(app: &mut App, mouse: MouseEvent) -> Vec<ViewEvent> {
             app.viewport.transcript_scrollbar_dragging = false;
             app.viewport.selection_autoscroll = None;
 
+            // Click on the transcript scrollbar gutter starts a scrollbar
+            // drag so the visible thumb remains interactive for users who
+            // prefer mouse-based navigation.
+            if mouse_hits_transcript_scrollbar(app, mouse) {
+                app.viewport.transcript_scrollbar_dragging = true;
+                return Vec::new();
+            }
+
             if mouse_hits_rect(mouse, app.viewport.jump_to_latest_button_area) {
                 app.scroll_to_bottom();
                 return Vec::new();

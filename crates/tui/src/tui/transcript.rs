@@ -924,9 +924,8 @@ mod tests {
         for i in 0..30 {
             cells.push(user_cell(&format!("complex query {i} about system design")));
             cells.push(HistoryCell::Thinking {
-                content: format!(
-                    "line A\nline B\nline C\nline D\nline E\nline F\nline G\nline H\nline I\nline J"
-                ),
+                content: "line A\nline B\nline C\nline D\nline E\nline F\nline G\nline H\nline I\nline J"
+                    .to_string(),
                 streaming: false,
                 duration_secs: Some(3.5),
             });
@@ -934,9 +933,9 @@ mod tests {
                 &format!("response {i} with multi-line\ntext content spanning\nseveral lines"),
                 false,
             ));
-            cells.push(exec_tool_cell(&format!(
-                "cargo test --package my_crate -- --nocapture 2>&1 | head -40"
-            )));
+            cells.push(exec_tool_cell(
+                "cargo test --package my_crate -- --nocapture 2>&1 | head -40",
+            ));
             // Insert a second tool so adjacent tool cells merge into a railed group.
             cells.push(exec_tool_cell(&format!("git diff --stat HEAD~{i}")));
         }
@@ -969,7 +968,10 @@ mod tests {
         eprintln!("  lines × 8 bytes:   {} KB", total_lines * 8 / 1024);
 
         // Sanity: per-line overhead must be reasonable.
-        assert!(memory_kb < 1024.0, "rail_prefix_widths memory unexpectedly large: {memory_kb:.1} KB");
+        assert!(
+            memory_kb < 1024.0,
+            "rail_prefix_widths memory unexpectedly large: {memory_kb:.1} KB"
+        );
         eprintln!("  ✓ well under 1 MB even for very long sessions");
     }
 }
