@@ -444,38 +444,33 @@ fn should_try_local_reference_completion(needle: &str) -> bool {
 
 fn local_reference_paths(root: &Path, limit: usize) -> Vec<PathBuf> {
     let mut out = Vec::new();
-    collect_local_reference_paths(root, 0, limit, &mut out);
-    out
-}
+    let mut builder = WalkBuilder::new(root);
+    builder
+        .hidden(false)
+        .follow_links(false)
+        .max_depth(Some(COMPLETIONS_WALK_DEPTH))
+        .git_ignore(false)
+        .git_global(false)
+        .git_exclude(false);
+    let _ = builder.add_custom_ignore_filename(".deepseekignore");
+    builder.filter_entry(|entry| !should_skip_local_reference_dir(entry.path()));
 
-fn collect_local_reference_paths(root: &Path, depth: usize, limit: usize, out: &mut Vec<PathBuf>) {
-    if depth > COMPLETIONS_WALK_DEPTH || out.len() >= limit {
-        return;
-    }
-
-    let entries = match std::fs::read_dir(root) {
-        Ok(entries) => entries,
-        Err(_) => return,
-    };
-
-    for entry in entries.flatten() {
+    for entry in builder.build().flatten() {
         if out.len() >= limit {
             break;
         }
         let path = entry.path();
-        let Ok(file_type) = entry.file_type() else {
+        if path == root {
             continue;
-        };
-        if file_type.is_dir() {
-            if should_skip_local_reference_dir(&path) {
-                continue;
-            }
-            out.push(path.clone());
-            collect_local_reference_paths(&path, depth + 1, limit, out);
-        } else if file_type.is_file() {
-            out.push(path);
+        }
+        if entry
+            .file_type()
+            .is_some_and(|ft| ft.is_file() || ft.is_dir())
+        {
+            out.push(path.to_path_buf());
         }
     }
+    out
 }
 
 fn should_skip_local_reference_dir(path: &Path) -> bool {
@@ -1449,12 +1444,18 @@ mod tests {
     fn workspace_completions_surface_explicit_hidden_and_ignored_paths() {
         let tmp = TempDir::new().unwrap();
         std::fs::write(tmp.path().join(".gitignore"), ".deepseek/\n.generated/\n").unwrap();
+        std::fs::write(
+            tmp.path().join(".deepseekignore"),
+            ".generated/specs/secrets.env\n",
+        )
+        .unwrap();
         let deepseek_commands = tmp.path().join(".deepseek").join("commands");
         let generated_specs = tmp.path().join(".generated").join("specs");
         std::fs::create_dir_all(&deepseek_commands).unwrap();
         std::fs::create_dir_all(&generated_specs).unwrap();
         std::fs::write(deepseek_commands.join("start-task.md"), "start").unwrap();
         std::fs::write(generated_specs.join("device-layout.md"), "layout").unwrap();
+        std::fs::write(generated_specs.join("secrets.env"), "secret").unwrap();
 
         let ws = Workspace::with_cwd(tmp.path().to_path_buf(), Some(tmp.path().to_path_buf()));
 
@@ -1473,20 +1474,40 @@ mod tests {
                 .any(|e| e == ".generated/specs/device-layout.md"),
             "expected explicitly addressed ignored user folder in completions: {generated_entries:?}",
         );
+        assert!(
+            !generated_entries
+                .iter()
+                .any(|e| e == ".generated/specs/secrets.env"),
+            ".deepseekignore entries must not be reintroduced by local fallback: {generated_entries:?}",
+        );
     }
 
     #[test]
-    fn fuzzy_index_resolves_hidden_and_ignored_files() {
+    fn fuzzy_index_resolves_hidden_and_ignored_files_except_deepseekignored() {
         let tmp = TempDir::new().unwrap();
         std::fs::write(tmp.path().join(".gitignore"), ".generated/\n").unwrap();
+        std::fs::write(
+            tmp.path().join(".deepseekignore"),
+            ".generated/specs/secrets.env\n",
+        )
+        .unwrap();
         let generated_specs = tmp.path().join(".generated").join("specs");
         std::fs::create_dir_all(&generated_specs).unwrap();
         std::fs::write(generated_specs.join("device-layout.md"), "layout").unwrap();
+        std::fs::write(generated_specs.join("secrets.env"), "secret").unwrap();
 
         let ws = Workspace::with_cwd(tmp.path().to_path_buf(), None);
         let resolved = ws.resolve("device-layout.md").unwrap();
 
         assert!(resolved.ends_with(".generated/specs/device-layout.md"));
+        assert!(
+            ws.resolve("secrets.env").is_err(),
+            "basename fuzzy resolution must honor .deepseekignore"
+        );
+        assert!(
+            ws.resolve(".generated/specs/secrets.env").is_ok(),
+            "exact user-specified paths should still resolve"
+        );
     }
 
     #[test]
