@@ -5,13 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.8.24] - 2026-05-08
+## [0.8.24] - 2026-05-09
 
 A bugfix + refactor release picking up the backlog after the v0.8.23 security
 release.
 
 ### Fixed
 
+- **Mouse-wheel scroll survives focus toggles** — on macOS, switching away
+  (Cmd+Tab, opening the screenshot tool, etc.) and back can drop the
+  terminal's mouse-tracking mode, leaving wheel scroll dead until restart.
+  The TUI now re-arms `EnableMouseCapture` on `FocusGained` alongside the
+  existing keyboard-mode recapture, so wheel events keep flowing after a
+  focus round-trip.
 - **Workspace-local slash commands are now loaded (#1259)** — user command
   files placed in `<workspace>/.deepseek/commands/`,
   `<workspace>/.claude/commands/`, and `<workspace>/.cursor/commands/` are

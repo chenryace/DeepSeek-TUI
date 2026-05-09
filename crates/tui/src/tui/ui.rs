@@ -1596,8 +1596,14 @@ async fn run_event_loop(
             // terminal's keyboard mode, which breaks IME compositor state.
             // Acknowledging FocusGained and re-pushing the flags restores
             // the IME so CJK input methods work after a focus toggle.
+            // The same reset can drop the terminal's mouse-tracking mode,
+            // leaving wheel scroll dead until restart — re-arm mouse
+            // capture on focus-gain so wheel events keep flowing.
             if terminal_event_needs_viewport_recapture(&evt) {
                 push_keyboard_enhancement_flags(terminal.backend_mut());
+                if app.use_mouse_capture {
+                    let _ = execute!(terminal.backend_mut(), EnableMouseCapture);
+                }
                 force_terminal_repaint = true;
                 app.needs_redraw = true;
             }
