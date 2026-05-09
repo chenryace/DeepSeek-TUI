@@ -1658,18 +1658,30 @@ fn run_git(workspace: &std::path::Path, args: &[&str]) -> Option<String> {
 }
 
 fn resolve_skills_dir(config: &Config, workspace: &std::path::Path) -> PathBuf {
-    let workspace = fs::canonicalize(workspace).unwrap_or_else(|_| workspace.to_path_buf());
+    let configured_skills_dir = config.skills_dir();
+    let trusted_root = fs::canonicalize(&configured_skills_dir).unwrap_or(configured_skills_dir.clone());
+
+    let workspace = match fs::canonicalize(workspace) {
+        Ok(path) => path,
+        Err(_) => return configured_skills_dir,
+    };
+
+    if !workspace.starts_with(&trusted_root) {
+        return configured_skills_dir;
+    }
+
     for candidate in [
         workspace.join(".agents").join("skills"),
         workspace.join("skills"),
     ] {
         if let Ok(candidate) = fs::canonicalize(candidate)
+            && candidate.starts_with(&trusted_root)
             && candidate.is_dir()
         {
             return candidate;
         }
     }
-    config.skills_dir()
+    configured_skills_dir
 }
 
 fn load_mcp_config_or_default(path: &std::path::Path) -> Result<McpConfig, ApiError> {
