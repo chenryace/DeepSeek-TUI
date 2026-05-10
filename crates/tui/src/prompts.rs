@@ -152,6 +152,14 @@ pub const NEVER_APPROVAL: &str = include_str!("prompts/approvals/never.md");
 /// model knows the format to use when writing `.deepseek/handoff.md`.
 pub const COMPACT_TEMPLATE: &str = include_str!("prompts/compact.md");
 
+/// Memory hygiene guidance — appended to the system prompt only when the
+/// session has a non-empty user-memory block. Steers the model toward
+/// writing durable memories as declarative facts ("User prefers concise
+/// responses") rather than imperatives ("Always respond concisely"),
+/// because imperatives get re-read as directives in later sessions and
+/// can override the user's current request (#725).
+pub const MEMORY_GUIDANCE: &str = include_str!("prompts/memory_guidance.md");
+
 // ── Legacy prompt constants (kept for backwards compatibility) ────────
 
 /// Legacy base prompt (agent.txt — now decomposed into base.md + overlays).
@@ -416,10 +424,16 @@ pub fn system_prompt_for_mode_with_context_skills_session_and_approval(
     // 2.5b. User memory block (#489). Goes above skills/context-management
     // because it's session-stable: the memory file changes when the user
     // edits it via `/memory` or `# foo` quick-add, but not turn-over-turn.
+    //
+    // When memory is active, also append `MEMORY_GUIDANCE` (#725) so the
+    // model writes new memories as declarative facts rather than
+    // imperatives. The guidance is pinned to the memory branch so its
+    // bytes don't enter the prompt for sessions that never use memory —
+    // those sessions stay byte-identical to before.
     if let Some(memory_block) = session_context.user_memory_block
         && !memory_block.trim().is_empty()
     {
-        full_prompt = format!("{full_prompt}\n\n{memory_block}");
+        full_prompt = format!("{full_prompt}\n\n{memory_block}\n\n{MEMORY_GUIDANCE}");
     }
 
     if let Some(goal_objective) = session_context.goal_objective
@@ -563,6 +577,69 @@ mod tests {
         assert!(prompt.contains("## Environment"));
         assert!(prompt.contains("- lang: ja"));
         assert!(prompt.contains("- deepseek_version:"));
+    }
+
+    #[test]
+    fn memory_guidance_carries_paired_examples() {
+        // The fragment is the contract — verify the verbatim ✓ / ✗
+        // pair is present so V4 has both shapes to imitate.
+        assert!(MEMORY_GUIDANCE.contains("declarative facts"));
+        assert!(MEMORY_GUIDANCE.contains(" ✓"));
+        assert!(MEMORY_GUIDANCE.contains(" ✗"));
+        assert!(MEMORY_GUIDANCE.contains("Imperative"));
+    }
+
+    #[test]
+    fn memory_guidance_absent_when_no_memory_block() {
+        let tmp = tempdir().expect("tempdir");
+        let prompt = match system_prompt_for_mode_with_context_skills_and_session(
+            AppMode::Agent,
+            tmp.path(),
+            None,
+            None,
+            None,
+            PromptSessionContext {
+                user_memory_block: None,
+                goal_objective: None,
+                project_context_pack_enabled: false,
+                locale_tag: "en",
+            },
+        ) {
+            SystemPrompt::Text(text) => text,
+            SystemPrompt::Blocks(_) => panic!("expected text system prompt"),
+        };
+        assert!(
+            !prompt.contains("Memory Hygiene"),
+            "memory guidance must not leak into sessions without a memory block"
+        );
+    }
+
+    #[test]
+    fn memory_guidance_appended_after_memory_block() {
+        let tmp = tempdir().expect("tempdir");
+        let block = "## User Memory\n\n- prefers Rust\n";
+        let prompt = match system_prompt_for_mode_with_context_skills_and_session(
+            AppMode::Agent,
+            tmp.path(),
+            None,
+            None,
+            None,
+            PromptSessionContext {
+                user_memory_block: Some(block),
+                goal_objective: None,
+                project_context_pack_enabled: false,
+                locale_tag: "en",
+            },
+        ) {
+            SystemPrompt::Text(text) => text,
+            SystemPrompt::Blocks(_) => panic!("expected text system prompt"),
+        };
+        let mem_at = prompt.find("User Memory").expect("user memory present");
+        let guide_at = prompt.find("Memory Hygiene").expect("guidance present");
+        assert!(
+            mem_at < guide_at,
+            "guidance must come after the user memory block"
+        );
     }
 
     #[test]
