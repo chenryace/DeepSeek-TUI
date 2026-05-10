@@ -9,6 +9,7 @@ mod config;
 mod core;
 mod cycle;
 mod debug;
+mod feedback;
 mod goal;
 mod hooks;
 mod init;
@@ -26,6 +27,7 @@ mod session;
 pub mod share;
 mod skills;
 mod stash;
+mod status;
 mod task;
 mod user_commands;
 
@@ -208,6 +210,12 @@ pub const COMMANDS: &[CommandInfo] = &[
         description_id: MessageId::CmdLinksDescription,
     },
     CommandInfo {
+        name: "feedback",
+        aliases: &[],
+        usage: "/feedback [bug|feature|security]",
+        description_id: MessageId::CmdFeedbackDescription,
+    },
+    CommandInfo {
         name: "home",
         aliases: &["stats", "overview"],
         usage: "/home",
@@ -324,22 +332,10 @@ pub const COMMANDS: &[CommandInfo] = &[
         description_id: MessageId::CmdConfigDescription,
     },
     CommandInfo {
-        name: "yolo",
+        name: "mode",
         aliases: &[],
-        usage: "/yolo",
-        description_id: MessageId::CmdYoloDescription,
-    },
-    CommandInfo {
-        name: "agent",
-        aliases: &[],
-        usage: "/agent",
-        description_id: MessageId::CmdAgentDescription,
-    },
-    CommandInfo {
-        name: "plan",
-        aliases: &[],
-        usage: "/plan",
-        description_id: MessageId::CmdPlanDescription,
+        usage: "/mode [agent|plan|yolo|1|2|3]",
+        description_id: MessageId::CmdModeDescription,
     },
     CommandInfo {
         name: "theme",
@@ -433,8 +429,14 @@ pub const COMMANDS: &[CommandInfo] = &[
         description_id: MessageId::CmdSettingsDescription,
     },
     CommandInfo {
+        name: "status",
+        aliases: &[],
+        usage: "/status",
+        description_id: MessageId::CmdStatusDescription,
+    },
+    CommandInfo {
         name: "statusline",
-        aliases: &["status"],
+        aliases: &[],
         usage: "/statusline",
         description_id: MessageId::CmdStatuslineDescription,
     },
@@ -442,7 +444,7 @@ pub const COMMANDS: &[CommandInfo] = &[
     CommandInfo {
         name: "skills",
         aliases: &[],
-        usage: "/skills [--remote|sync]",
+        usage: "/skills [--remote|sync|<prefix>]",
         description_id: MessageId::CmdSkillsDescription,
     },
     CommandInfo {
@@ -520,6 +522,7 @@ pub fn execute(cmd: &str, app: &mut App) -> CommandResult {
         "hooks" | "hook" => hooks::hooks(app, arg),
         "subagents" | "agents" => core::subagents(app),
         "links" | "dashboard" | "api" => core::deepseek_links(app),
+        "feedback" => feedback::feedback(app, arg),
         "home" | "stats" | "overview" => core::home_dashboard(app),
         "note" => note::note(app, arg),
         "memory" => memory::memory(app, arg),
@@ -543,10 +546,9 @@ pub fn execute(cmd: &str, app: &mut App) -> CommandResult {
         // Config commands
         "config" => config::config_command(app, arg),
         "settings" => config::show_settings(app),
-        "statusline" | "status" => config::status_line(app),
-        "yolo" => config::yolo(app),
-        "agent" => config::agent_mode(app),
-        "plan" => config::plan_mode(app),
+        "status" => status::status(app),
+        "statusline" => config::status_line(app),
+        "mode" => config::mode(app, arg),
         "theme" => config::theme(app),
         "verbose" => config::verbose(app, arg),
         "trust" => config::trust(app, arg),
@@ -599,7 +601,6 @@ pub fn execute(cmd: &str, app: &mut App) -> CommandResult {
         "set" => CommandResult::error(
             "The /set command was retired. Use /config to edit settings and /settings to inspect current values.",
         ),
-        "normal" => config::normal_mode(app),
         "deepseek" => CommandResult::error(
             "The /deepseek command was renamed. Use /links (aliases: /dashboard, /api).",
         ),
@@ -645,6 +646,10 @@ pub fn persist_status_items(
 /// Persist a root-level string key in `config.toml`.
 pub fn persist_root_string_key(key: &str, value: &str) -> anyhow::Result<std::path::PathBuf> {
     config::persist_root_string_key(key, value)
+}
+
+pub fn switch_mode(app: &mut App, mode: crate::tui::app::AppMode) -> String {
+    config::switch_mode(app, mode)
 }
 
 /// Auto-select a model based on request complexity.

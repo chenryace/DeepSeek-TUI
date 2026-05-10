@@ -3,7 +3,7 @@
 use std::collections::HashSet;
 use std::io::{self, Stdout, Write};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
@@ -48,7 +48,7 @@ use crate::palette;
 use crate::prompts;
 use crate::session_manager::{
     OfflineQueueState, QueuedSessionMessage, SavedSession, SessionManager,
-    create_saved_session_with_mode, update_session,
+    create_saved_session_with_id_and_mode, create_saved_session_with_mode, update_session,
 };
 use crate::task_manager::{
     NewTaskRequest, SharedTaskManager, TaskManager, TaskManagerConfig, TaskStatus,
@@ -139,7 +139,15 @@ const SIDEBAR_VISIBLE_MIN_WIDTH: u16 = 100;
 const DEFAULT_TERMINAL_PROBE_TIMEOUT_MS: u64 = 500;
 
 type AppTerminal = Terminal<ColorCompatBackend<Stdout>>;
-const TERMINAL_ORIGIN_RESET: &[u8] = b"\x1b[r\x1b[?6l\x1b[H\x1b[2J\x1b[3J";
+// Reset scroll region (`\x1b[r`), origin mode (`\x1b[?6l`), and home the cursor
+// (`\x1b[H`) before letting ratatui's diff renderer repaint. The destructive
+// `\x1b[2J\x1b[3J` pair was previously appended here to also wipe the visible
+// screen and saved scrollback, but combined with the immediately-following
+// `terminal.clear()` it produced a double-clear that several terminals
+// (Ghostty, VSCode terminal, Win10 conhost) render as visible flicker on every
+// TurnComplete / focus-gain / resize. The alt-screen buffer's double-buffering
+// plus ratatui's `terminal.clear()` are sufficient to repaint cleanly.
+const TERMINAL_ORIGIN_RESET: &[u8] = b"\x1b[r\x1b[?6l\x1b[H";
 
 /// Run the interactive TUI event loop.
 ///
@@ -366,6 +374,7 @@ pub async fn run_tui(config: &Config, options: TuiOptions) -> Result<()> {
     if !app.api_messages.is_empty() {
         let _ = engine_handle
             .send(Op::SyncSession {
+                session_id: app.current_session_id.clone(),
                 messages: app.api_messages.clone(),
                 system_prompt: app.system_prompt.clone(),
                 model: app.model.clone(),
@@ -851,6 +860,16 @@ async fn run_event_loop(
                         app.streaming_message_index = None;
                         app.streaming_thinking_active_entry = None;
                         app.turn_started_at = Some(Instant::now());
+                        // Discoverability hint for users who don't know how
+                        // to interrupt a long-running turn (#1367). Only
+                        // surface when the status_message slot is empty so
+                        // we don't trample over a real transient message
+                        // (e.g. "/queue saved", "Selection copied"); the
+                        // hint then auto-clears as soon as anything else
+                        // updates the slot.
+                        if app.status_message.is_none() {
+                            app.status_message = Some("Press Esc or Ctrl+C to cancel".to_string());
+                        }
                         app.runtime_turn_id = Some(turn_id);
                         app.runtime_turn_status = Some("in_progress".to_string());
                         app.reasoning_buffer.clear();
@@ -1041,11 +1060,13 @@ async fn run_event_loop(
                         app.status_message = Some(message);
                     }
                     EngineEvent::SessionUpdated {
+                        session_id,
                         messages,
                         system_prompt,
                         model,
                         workspace,
                     } => {
+                        app.current_session_id = Some(session_id);
                         app.api_messages = messages;
                         app.system_prompt = system_prompt;
                         if app.auto_model {
@@ -1574,6 +1595,12 @@ async fn run_event_loop(
                     preview = %text.chars().take(80).collect::<String>(),
                     "Received bracketed paste event"
                 );
+                // Once a real bracketed-paste event has been observed in
+                // this session, the rapid-keystroke heuristic in
+                // paste_burst is redundant — disable it so fast typing /
+                // IME commits / autocomplete bursts don't get
+                // mis-classified as a paste.
+                app.bracketed_paste_seen = true;
                 if app.onboarding == OnboardingState::ApiKey {
                     // Paste into API key input
                     app.insert_api_key_str(text);
@@ -1846,6 +1873,7 @@ async fn run_event_loop(
                                     if !app.api_messages.is_empty() {
                                         let _ = engine_handle
                                             .send(Op::SyncSession {
+                                                session_id: app.current_session_id.clone(),
                                                 messages: app.api_messages.clone(),
                                                 system_prompt: app.system_prompt.clone(),
                                                 model: app.model.clone(),
@@ -2245,34 +2273,38 @@ async fn run_event_loop(
                     copy_active_selection(app);
                 }
                 KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    // Three behaviors layered on Ctrl+C, in priority order:
-                    //   1. While a turn is in flight, cancel it (unchanged).
-                    //   2. Otherwise, on the first press, arm a 2-second
-                    //      "press Ctrl+C again to quit" prompt and stay
-                    //      running.
-                    //   3. On the second press while still armed, exit cleanly.
-                    // The prompt expires silently after the window so a
-                    // stray Ctrl+C three seconds later re-arms instead of
-                    // accidentally exiting.
-                    if app.is_loading {
-                        engine_handle.cancel();
-                        app.is_loading = false;
-                        app.dispatch_started_at = None;
-                        app.streaming_state.reset();
-                        // Optimistically clear the turn-in-progress flag so
-                        // the footer wave animation halts immediately —
-                        // without this, the strip keeps animating until the
-                        // engine eventually emits TurnComplete (#5a). The
-                        // engine's eventual TurnComplete event will overwrite
-                        // with the real outcome ("interrupted").
-                        app.runtime_turn_status = None;
-                        app.status_message = Some("Request cancelled".to_string());
-                        app.disarm_quit();
-                    } else if app.quit_is_armed() {
-                        let _ = engine_handle.send(Op::Shutdown).await;
-                        return Ok(());
-                    } else {
-                        app.arm_quit();
+                    // Four behaviors layered on Ctrl+C in priority order — see
+                    // `CtrlCDisposition` for the unit-tested decision table.
+                    // 1. selection active → copy + clear (Windows convention,
+                    //    #1337); 2. turn in flight → cancel; 3. quit-armed →
+                    //    exit; 4. otherwise → arm the 2-second exit prompt.
+                    match ctrl_c_disposition(app) {
+                        CtrlCDisposition::CopySelection => {
+                            copy_active_selection(app);
+                            app.viewport.transcript_selection.clear();
+                        }
+                        CtrlCDisposition::CancelTurn => {
+                            engine_handle.cancel();
+                            app.is_loading = false;
+                            app.dispatch_started_at = None;
+                            app.streaming_state.reset();
+                            // Optimistically clear the turn-in-progress flag
+                            // so the footer wave animation halts immediately —
+                            // without this, the strip keeps animating until
+                            // the engine eventually emits TurnComplete (#5a).
+                            // The engine's eventual TurnComplete event will
+                            // overwrite with the real outcome ("interrupted").
+                            app.runtime_turn_status = None;
+                            app.status_message = Some("Request cancelled".to_string());
+                            app.disarm_quit();
+                        }
+                        CtrlCDisposition::ConfirmExit => {
+                            let _ = engine_handle.send(Op::Shutdown).await;
+                            return Ok(());
+                        }
+                        CtrlCDisposition::ArmExit => {
+                            app.arm_quit();
+                        }
                     }
                 }
                 KeyCode::Char('d')
@@ -2632,6 +2664,7 @@ async fn run_event_loop(
                                 app.edit_in_progress = false;
                                 let _ = engine_handle
                                     .send(Op::SyncSession {
+                                        session_id: app.current_session_id.clone(),
                                         messages: app.api_messages.clone(),
                                         system_prompt: app.system_prompt.clone(),
                                         model: app.model.clone(),
@@ -3061,17 +3094,31 @@ fn build_session_snapshot(app: &App, manager: &SessionManager) -> SavedSession {
         );
         updated.metadata.mode = Some(app.mode.as_setting().to_string());
         updated.context_references = app.session_context_references.clone();
+        updated.artifacts = app.session_artifacts.clone();
         updated
     } else {
-        let mut session = create_saved_session_with_mode(
-            &app.api_messages,
-            &app.model,
-            &app.workspace,
-            u64::from(app.session.total_tokens),
-            app.system_prompt.as_ref(),
-            Some(app.mode.as_setting()),
-        );
+        let mut session = if let Some(existing_id) = app.current_session_id.as_ref() {
+            create_saved_session_with_id_and_mode(
+                existing_id.clone(),
+                &app.api_messages,
+                &app.model,
+                &app.workspace,
+                u64::from(app.session.total_tokens),
+                app.system_prompt.as_ref(),
+                Some(app.mode.as_setting()),
+            )
+        } else {
+            create_saved_session_with_mode(
+                &app.api_messages,
+                &app.model,
+                &app.workspace,
+                u64::from(app.session.total_tokens),
+                app.system_prompt.as_ref(),
+                Some(app.mode.as_setting()),
+            )
+        };
         session.context_references = app.session_context_references.clone();
+        session.artifacts = app.session_artifacts.clone();
         session
     }
 }
@@ -3572,13 +3619,27 @@ fn handle_composer_history_arrow(
         return false;
     }
 
+    // When `composer_arrows_scroll` is enabled and the composer is empty,
+    // plain Up/Down scroll the transcript.  This helps terminals that map
+    // trackpad gestures to arrow keys.  Otherwise arrows always navigate
+    // input history regardless of composer state (#1117).
+    let scroll_on_empty = app.composer_arrows_scroll && app.input.trim().is_empty();
+
     match key.code {
         KeyCode::Up => {
-            app.history_up();
+            if scroll_on_empty {
+                app.scroll_up(1);
+            } else {
+                app.history_up();
+            }
             true
         }
         KeyCode::Down => {
-            app.history_down();
+            if scroll_on_empty {
+                app.scroll_down(1);
+            } else {
+                app.history_down();
+            }
             true
         }
         _ => false,
@@ -4125,6 +4186,7 @@ async fn apply_model_picker_choice(
         Ok(mut settings) => {
             if model_changed {
                 let _ = settings.set("default_model", &model);
+                settings.set_model_for_provider(app.api_provider.as_str(), &model);
             }
             if effort_changed {
                 let _ = settings.set("reasoning_effort", effort.as_setting());
@@ -4247,6 +4309,7 @@ async fn switch_provider(
     if !app.api_messages.is_empty() {
         let _ = engine_handle
             .send(Op::SyncSession {
+                session_id: app.current_session_id.clone(),
                 messages: app.api_messages.clone(),
                 system_prompt: app.system_prompt.clone(),
                 model: app.model.clone(),
@@ -4270,6 +4333,12 @@ async fn switch_provider(
         ),
     });
     app.status_message = Some(format!("Provider: {}", target.as_str()));
+
+    // Persist the provider choice so it survives restarts.
+    if let Ok(mut settings) = crate::settings::Settings::load() {
+        settings.default_provider = Some(target.as_str().to_string());
+        let _ = settings.save();
+    }
 }
 
 fn open_text_pager(app: &mut App, title: String, content: String) {
@@ -4546,14 +4615,22 @@ async fn apply_command_result(
                 app.status_message = Some(format!("Session loaded from {}", path.display()));
             }
             AppAction::SyncSession {
+                session_id,
                 messages,
                 system_prompt,
                 model,
                 workspace,
             } => {
+                let mut session_id = session_id;
                 let is_full_reset = messages.is_empty() && system_prompt.is_none();
+                if is_full_reset && session_id.is_none() {
+                    let new_session_id = uuid::Uuid::new_v4().to_string();
+                    app.current_session_id = Some(new_session_id.clone());
+                    session_id = Some(new_session_id);
+                }
                 let _ = engine_handle
                     .send(Op::SyncSession {
+                        session_id,
                         messages,
                         system_prompt,
                         model,
@@ -4598,18 +4675,27 @@ async fn apply_command_result(
                 let _ = engine_handle.send(Op::ListSubAgents).await;
             }
             AppAction::FetchModels => {
-                app.status_message = Some("Fetching models...".to_string());
-                match fetch_available_models(config).await {
-                    Ok(models) => {
-                        app.add_message(HistoryCell::System {
-                            content: format_available_models_message(&app.model, &models),
-                        });
-                        app.status_message = Some(format!("Found {} model(s)", models.len()));
-                    }
-                    Err(error) => {
-                        app.add_message(HistoryCell::System {
-                            content: format!("Failed to fetch models: {error}"),
-                        });
+                if crate::config::provider_passes_model_through(config.api_provider()) {
+                    app.add_message(HistoryCell::System {
+                        content: format!(
+                            "/models is not supported by the {} provider.",
+                            config.api_provider().display_name()
+                        ),
+                    });
+                } else {
+                    app.status_message = Some("Fetching models...".to_string());
+                    match fetch_available_models(config).await {
+                        Ok(models) => {
+                            app.add_message(HistoryCell::System {
+                                content: format_available_models_message(&app.model, &models),
+                            });
+                            app.status_message = Some(format!("Found {} model(s)", models.len()));
+                        }
+                        Err(error) => {
+                            app.add_message(HistoryCell::System {
+                                content: format!("Failed to fetch models: {error}"),
+                            });
+                        }
                     }
                 }
             }
@@ -4721,6 +4807,14 @@ async fn apply_command_result(
                         ));
                 }
             }
+            AppAction::OpenModePicker => {
+                if app.view_stack.top_kind() != Some(ModalKind::ModePicker) {
+                    app.view_stack
+                        .push(crate::tui::views::mode_picker::ModePickerView::new(
+                            app.mode,
+                        ));
+                }
+            }
             AppAction::OpenStatusPicker => {
                 if app.view_stack.top_kind() != Some(ModalKind::StatusPicker) {
                     app.view_stack
@@ -4729,6 +4823,24 @@ async fn apply_command_result(
                         ));
                 }
             }
+            AppAction::OpenFeedbackPicker => {
+                if app.view_stack.top_kind() != Some(ModalKind::FeedbackPicker) {
+                    app.view_stack
+                        .push(crate::tui::feedback_picker::FeedbackPickerView::new());
+                }
+            }
+            AppAction::OpenExternalUrl { url, label } => match open_external_url(&url) {
+                Ok(()) => {
+                    app.status_message = Some(format!("Opened {label} in your browser"));
+                }
+                Err(err) => {
+                    app.add_message(HistoryCell::System {
+                        content: format!(
+                            "Could not open {label} automatically: {err}\n\nThe URL is printed above."
+                        ),
+                    });
+                }
+            },
             AppAction::OpenContextInspector => {
                 open_context_inspector(app);
             }
@@ -4819,6 +4931,7 @@ async fn apply_command_result(
                         if !app.api_messages.is_empty() {
                             let _ = engine_handle
                                 .send(Op::SyncSession {
+                                    session_id: app.current_session_id.clone(),
                                     messages: app.api_messages.clone(),
                                     system_prompt: app.system_prompt.clone(),
                                     model: app.model.clone(),
@@ -4866,6 +4979,43 @@ async fn apply_command_result(
     }
 
     Ok(false)
+}
+
+fn open_external_url(url: &str) -> Result<()> {
+    #[cfg(target_os = "macos")]
+    let mut command = {
+        let mut command = Command::new("open");
+        command.arg(url);
+        command
+    };
+    #[cfg(target_os = "linux")]
+    let mut command = {
+        let mut command = Command::new("xdg-open");
+        command.arg(url);
+        command
+    };
+    #[cfg(target_os = "windows")]
+    let mut command = {
+        let mut command = Command::new("cmd");
+        command.args(["/C", "start", "", url]);
+        command
+    };
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+    return Err(anyhow::anyhow!(
+        "browser opening is unsupported on this platform"
+    ));
+
+    let status = command
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map_err(|err| anyhow::anyhow!("failed to launch browser command: {err}"))?;
+    if !status.success() {
+        return Err(anyhow::anyhow!(
+            "browser command exited with status {status}"
+        ));
+    }
+    Ok(())
 }
 
 async fn handle_mcp_ui_action(
@@ -5646,6 +5796,15 @@ async fn handle_view_events(
             ViewEvent::OpenTextPager { title, content } => {
                 open_text_pager(app, title, content);
             }
+            ViewEvent::CopyToClipboard { text, label } => {
+                if text.is_empty() {
+                    app.status_message = Some(format!("{label} is empty"));
+                } else if app.clipboard.write_text(&text).is_ok() {
+                    app.status_message = Some(format!("{label} copied"));
+                } else {
+                    app.status_message = Some(format!("Copy failed ({label})"));
+                }
+            }
             ViewEvent::ApprovalDecision {
                 tool_id,
                 tool_name,
@@ -5760,6 +5919,7 @@ async fn handle_view_events(
                         let recovered = apply_loaded_session(app, &session);
                         let _ = engine_handle
                             .send(Op::SyncSession {
+                                session_id: app.current_session_id.clone(),
                                 messages: app.api_messages.clone(),
                                 system_prompt: app.system_prompt.clone(),
                                 model: app.model.clone(),
@@ -5881,6 +6041,10 @@ async fn handle_view_events(
             ViewEvent::ProviderPickerApiKeySubmitted { provider, api_key } => {
                 apply_provider_picker_api_key(app, engine_handle, config, provider, api_key).await;
             }
+            ViewEvent::ModeSelected { mode } => {
+                let msg = commands::switch_mode(app, mode);
+                app.add_message(HistoryCell::System { content: msg });
+            }
             ViewEvent::BacktrackStep { direction } => {
                 app.backtrack.step(direction);
                 if let Some(idx) = app.backtrack.selected_idx() {
@@ -5892,6 +6056,7 @@ async fn handle_view_events(
                     apply_backtrack(app, depth);
                     let _ = engine_handle
                         .send(Op::SyncSession {
+                            session_id: app.current_session_id.clone(),
                             messages: app.api_messages.clone(),
                             system_prompt: app.system_prompt.clone(),
                             model: app.model.clone(),
@@ -6144,8 +6309,23 @@ fn apply_loaded_session(app: &mut App, session: &SavedSession) -> bool {
     app.session.subagent_cost = 0.0;
     app.session.subagent_cost_cny = 0.0;
     app.session.subagent_cost_event_seqs.clear();
-    app.session.displayed_cost_high_water = 0.0;
-    app.session.displayed_cost_high_water_cny = 0.0;
+    // Restore the high-water marks from persisted metadata so the
+    // monotonic cost guarantee (#244) survives session restarts.
+    // Take the max with the current totals — old sessions without
+    // persisted high-water fields deserialise to 0.0 and fall back to
+    // the restored total with no regression.
+    let total_restored_usd = session.metadata.cost.total_usd();
+    let total_restored_cny = session.metadata.cost.total_cny();
+    app.session.displayed_cost_high_water = session
+        .metadata
+        .cost
+        .displayed_cost_high_water_usd
+        .max(total_restored_usd);
+    app.session.displayed_cost_high_water_cny = session
+        .metadata
+        .cost
+        .displayed_cost_high_water_cny
+        .max(total_restored_cny);
     app.session.last_prompt_tokens = None;
     app.session.last_completion_tokens = None;
     app.session.last_prompt_cache_hit_tokens = None;
@@ -6153,6 +6333,7 @@ fn apply_loaded_session(app: &mut App, session: &SavedSession) -> bool {
     app.session.last_reasoning_replay_tokens = None;
     app.session.turn_cache_history.clear();
     app.current_session_id = Some(session.metadata.id.clone());
+    app.session_artifacts = session.artifacts.clone();
     app.workspace_context = None;
     app.workspace_context_refreshed_at = None;
     if let Some(sp) = session.system_prompt.as_ref() {
@@ -6420,9 +6601,11 @@ fn reset_terminal_viewport(terminal: &mut AppTerminal) -> Result<()> {
     // Reset scroll margins and origin mode before clearing. Some interactive
     // child processes leave DECSTBM/DECOM behind; if ratatui's diff renderer
     // then writes "row 0", terminals can place it relative to the leaked
-    // scroll region and the whole viewport appears shifted down. CSI 3J also
-    // erases saved scrollback so a focus/resize recapture cannot leave the
-    // host terminal's scrollbar above the live TUI.
+    // scroll region and the whole viewport appears shifted down. We
+    // deliberately do *not* emit CSI 2J/3J here — see TERMINAL_ORIGIN_RESET
+    // for why; the immediately-following ratatui `terminal.clear()` flushes a
+    // single clear via the diff renderer, which the alt-screen buffer absorbs
+    // without visible flicker on the affected terminals.
     terminal.backend_mut().write_all(TERMINAL_ORIGIN_RESET)?;
     terminal.backend_mut().flush()?;
     terminal.clear()?;
@@ -8072,6 +8255,30 @@ fn selection_point_from_position(
 
 fn selection_has_content(app: &App) -> bool {
     selection_to_text(app).is_some_and(|text| !text.is_empty())
+}
+
+/// Branches taken by the Ctrl+C key handler. The order encodes priority and is
+/// the unit-tested contract for #1337 / #1367: a transcript selection always
+/// wins (so users learn that Ctrl+C copies when there's something to copy);
+/// otherwise an active turn is interrupted; otherwise the quit-arm flow runs.
+#[derive(Debug, PartialEq, Eq)]
+enum CtrlCDisposition {
+    CopySelection,
+    CancelTurn,
+    ConfirmExit,
+    ArmExit,
+}
+
+fn ctrl_c_disposition(app: &App) -> CtrlCDisposition {
+    if selection_has_content(app) {
+        CtrlCDisposition::CopySelection
+    } else if app.is_loading {
+        CtrlCDisposition::CancelTurn
+    } else if app.quit_is_armed() {
+        CtrlCDisposition::ConfirmExit
+    } else {
+        CtrlCDisposition::ArmExit
+    }
 }
 
 fn copy_active_selection(app: &mut App) {

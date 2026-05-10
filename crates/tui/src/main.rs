@@ -13,6 +13,7 @@ use tempfile::NamedTempFile;
 use wait_timeout::ChildExt;
 
 mod acp_server;
+mod artifacts;
 mod audit;
 mod auto_reasoning;
 mod automation_manager;
@@ -151,7 +152,8 @@ struct Cli {
     #[arg(long = "no-alt-screen", hide = true)]
     no_alt_screen: bool,
 
-    /// Enable TUI mouse capture for internal scrolling and transcript selection
+    /// Enable TUI mouse capture for internal scrolling, transcript selection,
+    /// and scrollbar dragging
     /// (default off on Windows)
     #[arg(long = "mouse-capture", conflicts_with = "no_mouse_capture")]
     mouse_capture: bool,
@@ -4642,6 +4644,7 @@ mod terminal_mode_tests {
                 terminal_probe_timeout_ms: None,
                 status_items: None,
                 osc8_links: None,
+                composer_arrows_scroll: None,
                 notification_condition: None,
             }),
             ..Config::default()
@@ -4715,6 +4718,7 @@ mod terminal_mode_tests {
                 terminal_probe_timeout_ms: None,
                 status_items: None,
                 osc8_links: None,
+                composer_arrows_scroll: None,
                 notification_condition: None,
             }),
             ..Config::default()
@@ -4745,6 +4749,7 @@ mod terminal_mode_tests {
                 terminal_probe_timeout_ms: None,
                 status_items: None,
                 osc8_links: None,
+                composer_arrows_scroll: None,
                 notification_condition: None,
             }),
             ..Config::default()
@@ -4826,6 +4831,7 @@ mod terminal_mode_tests {
                 terminal_probe_timeout_ms: None,
                 status_items: None,
                 osc8_links: None,
+                composer_arrows_scroll: None,
                 notification_condition: None,
             }),
             ..Config::default()
@@ -5515,6 +5521,7 @@ mod setup_helper_tests {
             "RUST_LOG",
             "DEEPSEEK_APPROVAL_POLICY",
             "DEEPSEEK_SANDBOX_MODE",
+            "DEEPSEEK_YOLO",
         ] {
             assert!(
                 keys.contains(required),

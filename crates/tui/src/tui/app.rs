@@ -8,6 +8,7 @@ use ratatui::layout::Rect;
 use serde_json::Value;
 use thiserror::Error;
 
+use crate::artifacts::ArtifactRecord;
 use crate::client::PromptInspection;
 use crate::compaction::CompactionConfig;
 use crate::config::{
@@ -719,8 +720,19 @@ pub struct App {
     pub use_memory: bool,
     pub use_alt_screen: bool,
     pub use_mouse_capture: bool,
+    /// When true, plain Up/Down on an empty composer scroll the transcript
+    /// instead of navigating input history (#1117 opt-in).
+    pub composer_arrows_scroll: bool,
     pub use_bracketed_paste: bool,
     pub use_paste_burst_detection: bool,
+    /// Set to `true` the first time a real `Event::Paste` arrives during a
+    /// session. Once set, `handle_paste_burst_key` short-circuits — there's
+    /// no point running the rapid-keypress heuristic on a terminal that
+    /// already delivers paste-as-event correctly. Avoids paste-burst false
+    /// positives on Ghostty / iTerm2 / WezTerm / Windows Terminal where
+    /// fast typing or IME commits could otherwise be mis-classified as a
+    /// paste burst (#1322 follow-up).
+    pub bracketed_paste_seen: bool,
     #[allow(dead_code)]
     pub system_prompt: Option<SystemPrompt>,
     pub auto_compact: bool,
@@ -800,6 +812,8 @@ pub struct App {
     pub backtrack: crate::tui::backtrack::BacktrackState,
     /// Current session ID for auto-save updates
     pub current_session_id: Option<String>,
+    /// Metadata-only registry of large tool outputs produced in this session.
+    pub session_artifacts: Vec<ArtifactRecord>,
     /// Trust mode - allow access outside workspace
     pub trust_mode: bool,
     /// Ordered list of footer items the user wants visible. Sourced from
@@ -1127,13 +1141,20 @@ impl App {
             initial_input,
         } = options;
 
-        let provider = config.api_provider();
+        let mut provider = config.api_provider();
 
         // Check if API key exists
         let needs_api_key = !has_api_key(config);
         let api_key_env_only = crate::config::active_provider_uses_env_only_api_key(config);
         let was_onboarded = crate::tui::onboarding::is_onboarded();
         let settings = Settings::load().unwrap_or_else(|_| Settings::default());
+
+        // Let settings override the config provider so runtime switches survive restarts.
+        if let Some(ref provider_str) = settings.default_provider
+            && let Some(parsed) = ApiProvider::parse(provider_str)
+        {
+            provider = parsed;
+        }
         let auto_compact = settings.auto_compact;
         let calm_mode = settings.calm_mode;
         let low_motion = settings.low_motion;
@@ -1162,7 +1183,20 @@ impl App {
         {
             ui_theme = ui_theme.with_background_color(background);
         }
-        let model = settings.default_model.clone().unwrap_or(model);
+        let model = settings
+            .provider_models
+            .as_ref()
+            .and_then(|m| m.get(provider.as_str()).cloned())
+            .or_else(|| {
+                // default_model is a DeepSeek-centric setting; other providers
+                // get their model from config.toml / env (e.g. OPENAI_MODEL).
+                if matches!(provider, ApiProvider::Deepseek | ApiProvider::DeepseekCN) {
+                    settings.default_model.clone()
+                } else {
+                    None
+                }
+            })
+            .unwrap_or(model);
         let auto_model = model.trim().eq_ignore_ascii_case("auto");
         let threshold_model = if auto_model {
             DEFAULT_TEXT_MODEL
@@ -1310,6 +1344,7 @@ impl App {
             use_mouse_capture,
             use_bracketed_paste,
             use_paste_burst_detection,
+            bracketed_paste_seen: false,
             system_prompt: None,
             auto_compact,
             calm_mode,
@@ -1362,6 +1397,7 @@ impl App {
             view_stack: ViewStack::new(),
             backtrack: crate::tui::backtrack::BacktrackState::new(),
             current_session_id: None,
+            session_artifacts: Vec::new(),
             trust_mode: initial_mode == AppMode::Yolo,
             status_items: config
                 .tui
@@ -1436,6 +1472,11 @@ impl App {
             collapsed_cell_map: Vec::new(),
             edit_in_progress: false,
             lsp_enabled: config.lsp.as_ref().and_then(|l| l.enabled).unwrap_or(true),
+            composer_arrows_scroll: config
+                .tui
+                .as_ref()
+                .and_then(|tui| tui.composer_arrows_scroll)
+                .unwrap_or(false),
         }
     }
 
@@ -1909,13 +1950,14 @@ impl App {
         self.needs_redraw = true;
     }
 
-    /// Clear the history and its revision tracking. Used by /clear, session
-    /// reset, and other "wipe and reload" flows.
+    /// Clear the history and its session-scoped side indexes. Used by /clear,
+    /// session reset, and other "wipe and reload" flows.
     pub fn clear_history(&mut self) {
         self.history.clear();
         self.history_revisions.clear();
         self.context_references_by_cell.clear();
         self.session_context_references.clear();
+        self.session_artifacts.clear();
         self.collapsed_cells.clear();
         self.collapsed_cell_map.clear();
         self.history_version = self.history_version.wrapping_add(1);
@@ -2504,6 +2546,14 @@ impl App {
             self.insert_str(&normalized);
         }
         self.paste_burst.clear_after_explicit_paste();
+        // Visible-before-submit consolidation: when the post-paste input
+        // is over the cap, swap it for an @paste-…md mention immediately
+        // (instead of waiting until the user presses Enter and getting
+        // surprised by an auto-sent @mention). The same logic runs as a
+        // safety-net at submit time so any other code path that fills
+        // self.input above the cap still consolidates rather than
+        // silently truncating.
+        self.consolidate_large_input_if_oversized();
     }
 
     pub fn insert_media_attachment(&mut self, kind: &str, path: &Path, description: Option<&str>) {
@@ -3424,12 +3474,12 @@ impl App {
             self.paste_burst.clear_after_explicit_paste();
             return None;
         }
-        // When the input exceeds the safety cap, consolidate it into a
-        // workspace paste file and replace it with an @mention so the
-        // model can read the full content at turn time (#553).
-        if char_count(&self.input) > MAX_SUBMITTED_INPUT_CHARS {
-            self.consolidate_large_input();
-        }
+        // Safety net: if any earlier path filled the buffer above the
+        // safety cap without going through `insert_paste_text`, fold it
+        // into a workspace paste file now (#553). Bracketed pastes hit
+        // the consolidation in `insert_paste_text` first, so the user
+        // sees the @mention in the composer before submission.
+        self.consolidate_large_input_if_oversized();
         let input = self.input.clone();
         if !input.starts_with('/') {
             self.input_history.push(input.clone());
@@ -3486,6 +3536,17 @@ impl App {
             }
         }
         self.submit_input()
+    }
+
+    /// Public wrapper around [`Self::consolidate_large_input`] that no-ops
+    /// when the current input fits inside the safety cap. Both the paste-
+    /// insert path (visible-before-submit) and the submit-time safety net
+    /// route through here, so the cap is enforced exactly once even when
+    /// both paths fire on the same buffer.
+    fn consolidate_large_input_if_oversized(&mut self) {
+        if char_count(&self.input) > MAX_SUBMITTED_INPUT_CHARS {
+            self.consolidate_large_input();
+        }
     }
 
     /// When the composer input exceeds [`MAX_SUBMITTED_INPUT_CHARS`], write
@@ -3810,6 +3871,7 @@ pub enum AppAction {
     #[allow(dead_code)] // For explicit /load command
     LoadSession(PathBuf),
     SyncSession {
+        session_id: Option<String>,
         messages: Vec<Message>,
         system_prompt: Option<SystemPrompt>,
         model: String,
@@ -3822,8 +3884,17 @@ pub enum AppAction {
     /// Open the `/provider` picker modal — DeepSeek / NVIDIA NIM / OpenRouter
     /// / Novita with inline API-key prompt for un-configured providers (#52).
     OpenProviderPicker,
+    /// Open the `/mode` picker modal for Agent / Plan / YOLO.
+    OpenModePicker,
     /// Open the `/statusline` multi-select picker for footer items.
     OpenStatusPicker,
+    /// Open the `/feedback` picker for GitHub issue/security destinations.
+    OpenFeedbackPicker,
+    /// Open an external URL in the system browser.
+    OpenExternalUrl {
+        url: String,
+        label: String,
+    },
     /// Send a message to the AI (normal chat mode).
     SendMessage(String),
     /// Run a Recursive Language Model (RLM) turn — Algorithm 1 from
@@ -4026,6 +4097,66 @@ mod tests {
                 .any(|(name, description)| name == "foo" && description == "Real foo skill"),
             "cached_skills should fall through to lower-precedence dir when higher-precedence one has an empty stub: {:?}",
             app.cached_skills,
+        );
+    }
+
+    #[test]
+    fn paste_consolidates_oversized_text_into_paste_file_visibly() {
+        // Visible-before-submit consolidation (paste UX): when a single
+        // bracketed paste exceeds the safety cap, the @mention must
+        // replace the input *immediately*, so the user sees what's
+        // about to be sent before pressing Enter — not as a side effect
+        // of submit.
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let mut opts = test_options(false);
+        opts.workspace = tmp.path().to_path_buf();
+        let mut app = App::new(opts, &Config::default());
+        let full_content = "y".repeat(MAX_SUBMITTED_INPUT_CHARS + 256);
+
+        app.insert_paste_text(&full_content);
+
+        // Composer should now contain the @mention, not the full text.
+        assert!(
+            app.input.starts_with("@.deepseek/pastes/paste-") && app.input.ends_with(".md"),
+            "expected @mention in composer after large paste, got: {}",
+            app.input
+        );
+        // The cursor moves to the end of the @mention.
+        assert_eq!(app.cursor_position, app.input.chars().count());
+        // The paste file must exist with the full content.
+        let rel_path = &app.input[1..];
+        let abs = tmp.path().join(rel_path);
+        assert!(abs.is_file(), "paste file must exist at {abs:?}");
+        let written = std::fs::read_to_string(&abs).expect("read");
+        assert_eq!(written, full_content);
+        // A toast confirms what happened so the user isn't surprised.
+        assert!(
+            app.status_toasts
+                .iter()
+                .any(|t| t.text.contains("consolidated")),
+            "expected consolidation toast"
+        );
+    }
+
+    #[test]
+    fn paste_under_threshold_does_not_consolidate() {
+        // Negative path: a small paste must NOT spawn a paste file. The
+        // input stays inline so the user can edit it freely.
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let mut opts = test_options(false);
+        opts.workspace = tmp.path().to_path_buf();
+        let mut app = App::new(opts, &Config::default());
+        let small = "hello world\nthis is fine".to_string();
+
+        app.insert_paste_text(&small);
+
+        assert_eq!(app.input, small);
+        assert!(!app.input.starts_with("@.deepseek/pastes/"));
+        // No paste file gets written for under-cap pastes.
+        let pastes_dir = tmp.path().join(".deepseek/pastes");
+        assert!(
+            !pastes_dir.exists() || std::fs::read_dir(&pastes_dir).unwrap().next().is_none(),
+            "no paste file should be written for under-cap content"
         );
     }
 
@@ -4397,6 +4528,7 @@ mod tests {
     #[test]
     fn history_search_filters_matches_and_skips_duplicates() {
         let mut app = App::new(test_options(false), &Config::default());
+        app.input_history.clear();
         app.input_history.push("alpha one".to_string());
         app.input_history.push("beta two".to_string());
         app.input_history.push("alpha one".to_string());
@@ -4414,6 +4546,7 @@ mod tests {
     #[test]
     fn history_search_matches_unicode_case_insensitively() {
         let mut app = App::new(test_options(false), &Config::default());
+        app.input_history.clear();
         app.input_history.push("CAFÉ prompt".to_string());
 
         app.start_history_search();
@@ -4428,6 +4561,7 @@ mod tests {
     #[test]
     fn history_search_accepts_match_without_submitting() {
         let mut app = App::new(test_options(false), &Config::default());
+        app.input_history.clear();
         app.input_history.push("older prompt".to_string());
 
         app.start_history_search();
@@ -4442,6 +4576,7 @@ mod tests {
     #[test]
     fn history_search_cancel_restores_pre_search_draft() {
         let mut app = App::new(test_options(false), &Config::default());
+        app.input_history.clear();
         app.input = "current draft".to_string();
         app.cursor_position = 7;
         app.input_history.push("older prompt".to_string());

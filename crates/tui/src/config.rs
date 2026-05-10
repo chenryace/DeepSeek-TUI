@@ -388,6 +388,12 @@ pub struct TuiConfig {
     /// - `Never` — suppress all turn-completion notifications.
     /// - Unset (default) — fall back to the `[notifications]` defaults.
     pub notification_condition: Option<NotificationCondition>,
+    /// When `true`, plain Up/Down on an empty composer scroll the
+    /// transcript instead of recalling input history.  Useful for
+    /// terminals that map trackpad gestures to arrow keys.  Default:
+    /// `false` (plain arrows always navigate input history, #1117).
+    #[serde(default)]
+    pub composer_arrows_scroll: Option<bool>,
 }
 
 /// High-level notification trigger override. See
@@ -770,6 +776,7 @@ pub struct Config {
     pub allow_shell: Option<bool>,
     pub approval_policy: Option<String>,
     pub sandbox_mode: Option<String>,
+    pub yolo: Option<bool>,
     /// External sandbox backend: `"none"` or `"opensandbox"`.
     /// When set, exec_shell routes commands through the backend's HTTP API
     /// instead of spawning a local process.
@@ -2120,7 +2127,11 @@ fn apply_env_overrides(config: &mut Config) {
     if matches!(config.api_provider(), ApiProvider::Openai)
         && let Ok(value) = std::env::var("OPENAI_MODEL")
     {
-        config.default_text_model = Some(value);
+        config
+            .providers
+            .get_or_insert_with(ProvidersConfig::default)
+            .openai
+            .model = Some(value);
     }
     if let Ok(value) =
         std::env::var("DEEPSEEK_MODEL").or_else(|_| std::env::var("DEEPSEEK_DEFAULT_TEXT_MODEL"))
@@ -2162,6 +2173,9 @@ fn apply_env_overrides(config: &mut Config) {
     }
     if let Ok(value) = std::env::var("DEEPSEEK_SANDBOX_MODE") {
         config.sandbox_mode = Some(value);
+    }
+    if let Ok(value) = std::env::var("DEEPSEEK_YOLO") {
+        config.yolo = Some(value == "1" || value.eq_ignore_ascii_case("true"));
     }
     if let Ok(value) = std::env::var("DEEPSEEK_SANDBOX_BACKEND") {
         config.sandbox_backend = Some(value);
@@ -2366,7 +2380,7 @@ fn normalize_model_for_provider(provider: ApiProvider, model: &str) -> Option<St
     normalize_model_name(model).map(|normalized| model_for_provider(provider, normalized))
 }
 
-fn provider_passes_model_through(provider: ApiProvider) -> bool {
+pub(crate) fn provider_passes_model_through(provider: ApiProvider) -> bool {
     matches!(provider, ApiProvider::Openai | ApiProvider::Ollama)
 }
 
@@ -2507,6 +2521,7 @@ fn merge_config(base: Config, override_cfg: Config) -> Config {
         // both — they list `~/global.md` inside the project array.
         instructions: override_cfg.instructions.or(base.instructions),
         allow_shell: override_cfg.allow_shell.or(base.allow_shell),
+        yolo: override_cfg.yolo.or(base.yolo),
         approval_policy: override_cfg.approval_policy.or(base.approval_policy),
         sandbox_mode: override_cfg.sandbox_mode.or(base.sandbox_mode),
         sandbox_backend: override_cfg.sandbox_backend.or(base.sandbox_backend),
