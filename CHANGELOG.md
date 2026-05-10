@@ -23,6 +23,9 @@ published.
 
 ### Fixed
 
+- **`/clear` resets the Todos sidebar (#1258)** — previously `/clear`
+  only reset the Plan panel; the Todos checklist persisted across
+  clears. Thanks **@Giggitycountless**.
 - **Drag-select past the viewport edge auto-scrolls (#1163, #1255,
   #1292, #1298)** — when the mouse drag reaches the top or bottom of
   the transcript area the viewport now scrolls to follow the
