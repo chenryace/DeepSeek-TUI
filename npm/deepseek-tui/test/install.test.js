@@ -171,6 +171,7 @@ test("manual binaries with mismatched checksums are not adopted", async (t) => {
     assetName,
     "0.8.25",
     async () => new Map([[assetName, sha256(Buffer.from("different bytes"))]]),
+    `${target}.version`,
   );
 
   assert.equal(adopted, false);

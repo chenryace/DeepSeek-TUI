@@ -1001,7 +1001,7 @@ function existingBinaryCandidates(targetPath, assetName) {
   return candidates;
 }
 
-async function adoptExistingBinaryIfValid(targetPath, assetName, version, getChecksums) {
+async function adoptExistingBinaryIfValid(targetPath, assetName, version, getChecksums, marker) {
   const candidates = [];
   for (const candidate of existingBinaryCandidates(targetPath, assetName)) {
     if (await fileExists(candidate)) {
@@ -1024,7 +1024,7 @@ async function adoptExistingBinaryIfValid(targetPath, assetName, version, getChe
     if (process.platform !== "win32") {
       await chmod(targetPath, 0o755);
     }
-    await writeFile(`${targetPath}.version`, String(version), "utf8");
+    await writeFile(marker, String(version), "utf8");
     return true;
   }
   return false;
@@ -1042,7 +1042,7 @@ async function ensureBinary(targetPath, assetName, version, repo, getChecksums, 
         return targetPath;
       }
     }
-    if (await adoptExistingBinaryIfValid(targetPath, assetName, version, getChecksums)) {
+    if (await adoptExistingBinaryIfValid(targetPath, assetName, version, getChecksums, marker)) {
       return targetPath;
     }
   }
