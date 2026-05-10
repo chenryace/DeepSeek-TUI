@@ -23,6 +23,10 @@ published.
 
 ### Fixed
 
+- **Workspace skills survive prompt truncation** — when the skill
+  catalog needs trimming to fit the prompt budget, workspace-local
+  skills now keep precedence over global ones rather than being
+  truncated indiscriminately. Thanks **@hhhaiai**.
 - **`/skills` listing has visual spacing** between entries so long
   skill descriptions don't run together. Thanks **@reidliu41**.
 - **Provider base-URL overrides reach the active provider** — the
