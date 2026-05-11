@@ -196,7 +196,7 @@ deepseek --provider ollama --model deepseek-coder:1.3b
 
 维护版本，核心是修复 v0.8.27 / v0.8.28 引入的"滚动幽灵"回归
 （#1085 类问题）和 Ctrl+R 会话恢复跨项目泄漏的问题（#1395），
-外加 20 个社区 PR。[完整更新日志](CHANGELOG.md)。
+外加 25 个社区 PR。[完整更新日志](CHANGELOG.md)。
 
 - **"滚动幽灵"彻底修复**（#1085 回归）。并行子代理运行
   `exec_shell` 时，alt-screen 会被滚动出 ratatui 差分渲染器的
@@ -253,6 +253,20 @@ deepseek --provider ollama --model deepseek-coder:1.3b
   `reasoning_content` replay，避免工具调用后的第二轮 400。
 - **技能补全收敛到 `/skill` 下**（#1437，PR #1442，来自
   **@reidliu41**）— 本地技能很多时不会再挤满根级 `/` 命令菜单。
+- **`edit_file` 拒绝无变化替换**（PR #1460，来自
+  **@xiluoduyu**）— `search` / `replace` 完全相同时会直接返回
+  清晰的参数错误，而不是生成空 diff。
+- **Windows 终端布局使用宽度稳定的字形**（#1314，PR #1465，来自
+  **@CrepuscularIRIS**）— header 和文件树不再依赖 cmd /
+  PowerShell 容易误判宽度的 SMP emoji。
+- **Ghostty 默认启用低动态渲染**（#1445，PR #1468，来自
+  **@CrepuscularIRIS**）— 受影响终端无需手动配置即可避开动画闪烁。
+- **Docker buildx provenance 的 EPERM 失败会给出提示**（#1449，
+  PR #1469，来自 **@CrepuscularIRIS**）— macOS shell 输出命中
+  受限 metadata 写入失败时，会提示 provenance 相关开关。
+- **Windows CMD 的鼠标滚轮回退会滚动 transcript**（#1443，
+  PR #1471，来自 **@CrepuscularIRIS**）— 关闭 mouse capture 时，
+  被终端映射成 Up / Down 的滚轮事件不再循环 composer 历史。
 - **`sync-cnb.yml` 工作流加固** — 显式 `permissions: contents:
   read`、`actions/checkout` v3 → v4、触发器收紧到 `main` +
   `v*` 标签（不再镜像 feature 分支）。
@@ -261,8 +275,9 @@ deepseek --provider ollama --model deepseek-coder:1.3b
   控制字节过滤（PR #1403–#1406，来自 **@linzhiqin2003**）。
 
 感谢本周期落地 10 个 PR 的 **@linzhiqin2003**、落地 5 个 PR 的
-**@reidliu41**，以及 **@SamhandsomeLee**、**@Beltran12138**、
-**@Wenjunyun123**、**@hlx98007**、**@Liu-Vince**，和报告 #1395 的
+**@reidliu41**、落地 4 个 PR 的 **@CrepuscularIRIS**，以及
+**@SamhandsomeLee**、**@Beltran12138**、**@Wenjunyun123**、
+**@hlx98007**、**@Liu-Vince**、**@xiluoduyu**，和报告 #1395 的
 **@shenxiaodaosanhua**。
 
 ---

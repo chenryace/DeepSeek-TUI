@@ -228,7 +228,7 @@ deepseek --provider ollama --model deepseek-coder:1.3b
 ## What's New In v0.8.29
 
 A maintenance release anchored by a v0.8.27 / v0.8.28 regression fix
-plus 20 community PRs. [Full changelog](CHANGELOG.md).
+plus 25 community PRs. [Full changelog](CHANGELOG.md).
 
 - **Scroll demon, gone for good** (#1085 regression). Parallel sub-
   agents running `exec_shell` would scroll the alt-screen out from
@@ -296,6 +296,22 @@ plus 20 community PRs. [Full changelog](CHANGELOG.md).
 - **Skill completions stay under `/skill`** (#1437, PR #1442 from
   **@reidliu41**) — large local skill collections no longer crowd
   the root slash-command menu.
+- **`edit_file` rejects no-op replacements** (PR #1460 from
+  **@xiluoduyu**) — identical `search` / `replace` values now fail
+  validation instead of returning an empty diff.
+- **Windows terminal layout gets width-stable glyphs** (#1314,
+  PR #1465 from **@CrepuscularIRIS**) — header and file-tree icons
+  no longer rely on SMP emoji that cmd / PowerShell can mismeasure.
+- **Ghostty uses low-motion rendering by default** (#1445, PR #1468
+  from **@CrepuscularIRIS**) — affected terminals avoid animation
+  flicker without manual config.
+- **Docker buildx provenance EPERM failures get a hint** (#1449,
+  PR #1469 from **@CrepuscularIRIS**) — macOS shell output points at
+  the provenance flag when that restricted metadata write fails.
+- **Windows CMD mouse-wheel fallback scrolls the transcript**
+  (#1443, PR #1471 from **@CrepuscularIRIS**) — wheel events mapped
+  to Up / Down no longer cycle composer history when mouse capture
+  is off.
 - **Sync-to-CNB workflow hardened** — explicit `permissions:
   contents: read`, narrowed trigger to `main` + `v*` tags (no longer
   mirrors feature branches), `actions/checkout` bumped v3 → v4.
@@ -305,9 +321,10 @@ plus 20 community PRs. [Full changelog](CHANGELOG.md).
   from **@linzhiqin2003**).
 
 Thanks to **@linzhiqin2003** (10 landings this cycle),
-**@reidliu41** (5 landings), **@SamhandsomeLee**,
-**@Beltran12138**, **@Wenjunyun123**, **@hlx98007**,
-**@Liu-Vince**, and **@shenxiaodaosanhua** for the bug report.
+**@reidliu41** (5 landings), **@CrepuscularIRIS** (4 landings),
+**@SamhandsomeLee**, **@Beltran12138**, **@Wenjunyun123**,
+**@hlx98007**, **@Liu-Vince**, **@xiluoduyu**, and
+**@shenxiaodaosanhua** for the bug report.
 
 ---
 

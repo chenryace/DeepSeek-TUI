@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 A maintenance release anchored by a regression fix for the
 "scroll demon" (#1085 class, re-introduced by v0.8.27's flicker
-patch) and a wrong-project session-restore bug (#1395). Plus 20
+patch) and a wrong-project session-restore bug (#1395). Plus 25
 community PRs covering MCP transport, prompt steering, auto-routing
 language coverage, web-search SERP filtering, and broad test
 coverage additions.
@@ -90,6 +90,26 @@ coverage additions.
   (#1437, PR #1442 from **@reidliu41**). Installed skills now
   complete under `/skill <name>` while the root `/` menu stays
   focused on built-in commands.
+- **`edit_file` rejects no-op replacements** (PR #1460 from
+  **@xiluoduyu**). Identical `search` / `replace` arguments now
+  fail fast with a clear validation error instead of producing an
+  empty diff that can trap the model in retry loops.
+- **Windows-terminal glyph widths are stable** (#1314, PR #1465
+  from **@CrepuscularIRIS**). SMP emoji in the header and file tree
+  were replaced with BMP-width-safe symbols / text so cmd,
+  PowerShell, WezTerm, and Alacritty do not mismeasure rows.
+- **Ghostty defaults to low-motion rendering** (#1445, PR #1468
+  from **@CrepuscularIRIS**). `TERM_PROGRAM=ghostty` now receives
+  the same animation cap as VS Code terminals to avoid redraw
+  flicker on affected setups.
+- **Docker buildx provenance permission failures get an actionable
+  hint** (#1449, PR #1469 from **@CrepuscularIRIS**). macOS shell
+  outputs matching the restricted provenance metadata failure now
+  include guidance to disable provenance for that build.
+- **Windows CMD mouse-wheel fallback scrolls the transcript**
+  (#1443, PR #1471 from **@CrepuscularIRIS**). When mouse capture is
+  off, composer arrow-scroll defaults on so terminal wheel events
+  mapped to Up / Down do not cycle composer history.
 
 ### Added
 
