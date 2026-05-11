@@ -3088,8 +3088,10 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {
-            for _ in 0..6 {
-                let (mut socket, _) = listener.accept().await.unwrap();
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    break;
+                };
                 tokio::spawn(async move {
                     let request = read_http_request(&mut socket).await;
                     assert!(request.starts_with("POST /mcp "));
