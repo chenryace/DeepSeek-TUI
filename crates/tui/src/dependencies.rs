@@ -117,6 +117,32 @@ pub fn resolve_pdftotext() -> Option<String> {
         .clone()
 }
 
+/// Resolve `pandoc` (universal document converter) once per
+/// process. Used by the `pandoc_convert` tool to decide whether
+/// to register itself with the model. Pandoc is a single-binary
+/// install, so the candidate list is just `pandoc` — no platform
+/// fallback path.
+pub fn resolve_pandoc() -> Option<String> {
+    static CACHE: OnceLock<Option<String>> = OnceLock::new();
+    CACHE
+        .get_or_init(|| {
+            if probe_executable("pandoc") {
+                tracing::info!(
+                    target: "tool_dependencies",
+                    "Resolved pandoc binary for pandoc_convert",
+                );
+                Some("pandoc".to_string())
+            } else {
+                tracing::warn!(
+                    target: "tool_dependencies",
+                    "pandoc binary not found; pandoc_convert tool will not be registered",
+                );
+                None
+            }
+        })
+        .clone()
+}
+
 /// Resolve the Node.js runtime once per process. Used by the
 /// `js_execution` tool to decide whether to advertise itself in
 /// the catalog. Unlike Python, the executable name `node` is the

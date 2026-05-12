@@ -2157,6 +2157,29 @@ async fn run_doctor(config: &Config, workspace: &Path, config_path_override: Opt
         }
     }
 
+    match crate::dependencies::resolve_pandoc() {
+        Some(_) => println!(
+            "  {} pandoc: present → pandoc_convert tool registered",
+            "✓".truecolor(aqua_r, aqua_g, aqua_b),
+        ),
+        None => {
+            println!("  {} pandoc: not found (optional)", "·".dimmed(),);
+            println!(
+                "    pandoc_convert tool is NOT advertised to the model. Install pandoc to enable:"
+            );
+            match std::env::consts::OS {
+                "macos" => println!("      brew install pandoc"),
+                "linux" => println!(
+                    "      sudo apt install pandoc    (Debian/Ubuntu) — or your distro's equivalent"
+                ),
+                "windows" => {
+                    println!("      winget install JohnMacFarlane.Pandoc")
+                }
+                other => println!("      install pandoc for {other} from pandoc.org"),
+            }
+        }
+    }
+
     // PDF reader: pure-Rust `pdf-extract` is the v0.8.32 default, so
     // `pdftotext` is no longer required for `read_file` to handle PDFs.
     // We still surface its presence (a) so users with column-heavy PDFs

@@ -39,6 +39,22 @@ real world uses."
 
 ### Added
 
+- **`pandoc_convert` tool — convert documents between formats via
+  the local pandoc binary.** Pandoc is the Swiss Army knife the
+  real world uses for moving prose around — Markdown to HTML,
+  HTML to Markdown, reST to anything, anything to DOCX / EPUB /
+  LaTeX — and surfacing it as a model-callable tool unblocks
+  "rewrite this report as ..." / "publish this changelog as ..."
+  workflows that previously needed the user to drop into a
+  terminal between turns. Curated target whitelist of 11 formats
+  (markdown, gfm, commonmark, html, rst, latex, docx, odt, epub,
+  plain, asciidoc) so the model can't ask for `pdf` (would need
+  LaTeX) or typos like `markown`. Binary targets (docx, odt,
+  epub) require an `output_path`; text targets can return the
+  converted text inline. Approval routes through the WritesFiles
+  / Suggest tier on every call. Registration is gated on
+  `dependencies::resolve_pandoc()`; `deepseek doctor` surfaces
+  the binary's status with platform-aware install hints.
 - **`js_execution` tool — execute model-provided JavaScript via a
   local Node.js runtime.** Mirrors `code_execution` (Python) so
   the model has a single consistent surface for "run this snippet

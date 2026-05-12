@@ -475,6 +475,21 @@ impl ToolRegistryBuilder {
         self.with_tool(Arc::new(DiagnosticsTool))
     }
 
+    /// Include the `pandoc_convert` tool only when the `pandoc`
+    /// binary is present on this host. Same probe-then-decide
+    /// pattern v0.8.31 introduced for Python — when pandoc is
+    /// missing the tool is not registered, so the model never
+    /// sees a binary it can't actually use.
+    #[must_use]
+    pub fn with_pandoc_tools(self) -> Self {
+        if crate::dependencies::resolve_pandoc().is_some() {
+            use super::pandoc::PandocConvertTool;
+            self.with_tool(Arc::new(PandocConvertTool))
+        } else {
+            self
+        }
+    }
+
     /// Include the `load_skill` tool (#434) so the model can pull a
     /// SKILL.md body + companion file list into context with one
     /// call instead of `read_file` + `list_dir` against the path
@@ -732,7 +747,8 @@ impl ToolRegistryBuilder {
             .with_validation_tools()
             .with_tool_result_retrieval_tool()
             .with_runtime_task_tools()
-            .with_revert_turn_tool();
+            .with_revert_turn_tool()
+            .with_pandoc_tools();
 
         if allow_shell {
             builder.with_shell_tools()
