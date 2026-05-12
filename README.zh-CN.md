@@ -40,6 +40,7 @@ docker run --rm -it \
 [![CI](https://github.com/Hmbown/DeepSeek-TUI/actions/workflows/ci.yml/badge.svg)](https://github.com/Hmbown/DeepSeek-TUI/actions/workflows/ci.yml)
 [![npm](https://img.shields.io/npm/v/deepseek-tui)](https://www.npmjs.com/package/deepseek-tui)
 [![crates.io](https://img.shields.io/crates/v/deepseek-tui-cli?label=crates.io)](https://crates.io/crates/deepseek-tui-cli)
+[DeepWiki project index](https://deepwiki.com/Hmbown/DeepSeek-TUI)
 
 ![DeepSeek TUI 截图](assets/screenshot.png)
 
@@ -85,7 +86,7 @@ DeepSeek TUI 是一个完全运行在终端里的编程智能体。它让 DeepSe
 ```bash
 npm install -g deepseek-tui
 deepseek --version
-deepseek
+deepseek --model auto
 ```
 
 预构建二进制覆盖 **Linux x64**、**Linux ARM64**（v0.8.8 起）、**macOS x64**、**macOS ARM64** 和 **Windows x64**。其他目标平台（musl、riscv64、FreeBSD 等）请见下方的[从源码安装](#从源码安装)或 [docs/INSTALL.md](docs/INSTALL.md)。
@@ -97,6 +98,7 @@ deepseek
 ```bash
 deepseek auth set --provider deepseek   # 保存到 ~/.deepseek/config.toml
 
+deepseek auth status                    # 显示当前活跃的凭证来源
 export DEEPSEEK_API_KEY="YOUR_KEY"      # 环境变量方式；需要在非交互式 shell 中使用请放入 ~/.zshenv
 deepseek
 
@@ -131,6 +133,21 @@ deepseek --version
 ```
 
 也可以直接从 [GitHub Releases](https://github.com/Hmbown/DeepSeek-TUI/releases) 下载预编译二进制。`DEEPSEEK_TUI_RELEASE_BASE_URL` 可用于镜像后的 release 资产。
+
+### 自动模式
+
+使用 `deepseek --model auto` 或 `/model auto` 让 DeepSeek TUI 自动判断当前轮次需要多少模型能力和推理强度。
+
+自动模式同时控制两个设置：
+
+- 模型：`deepseek-v4-flash` 或 `deepseek-v4-pro`
+- 推理：`off`、`high` 或 `max`
+
+在发送真实请求之前，应用会先用关闭推理的 `deepseek-v4-flash` 发起一次小型路由调用。路由器根据当前请求和上下文选择具体的模型和推理级别。简短/简单的轮次可以保持在 Flash + 关闭推理；编程、调试、发版、架构设计、安全审查或模糊的多步骤任务则可能提升到 Pro 和/或更高级别的推理。
+
+`auto` 是 DeepSeek TUI 本地功能。上游 API 永远不会收到 `model: "auto"`；它只会收到当轮选择的具体模型和推理设置。TUI 会显示所选路由，成本跟踪按实际运行的模型计费。如果路由调用失败或返回无效结果，应用会回退到本地启发式策略。子智能体会继承自动模式，除非你为它们指定了具体模型。
+
+如需可复现的基准测试、严格的成本上限或特定的 provider/model 映射，请使用固定模型或固定推理级别。
 
 ### Windows (Scoop)
 
@@ -323,6 +340,25 @@ deepseek update                                # 检查并应用二进制更新
 | `↑`（在输入框开头） | 选择附件行进行移除 |
 
 完整快捷键目录：[docs/KEYBINDINGS.md](docs/KEYBINDINGS.md)。
+
+### Zed / ACP
+
+DeepSeek 可以作为自定义 Agent Client Protocol 服务器运行，供通过 stdio 生成本地 ACP 智能体的编辑器使用。在 Zed 中，添加自定义智能体服务器：
+
+```json
+{
+  "agent_servers": {
+    "DeepSeek": {
+      "type": "custom",
+      "command": "deepseek",
+      "args": ["serve", "--acp"],
+      "env": {}
+    }
+  }
+}
+```
+
+首个 ACP 协议片支持通过现有 DeepSeek 配置/API Key 创建新会话和响应提示。基于工具的编辑和检查点回放尚未通过 ACP 暴露。
 
 ---
 
