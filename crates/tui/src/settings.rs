@@ -1035,6 +1035,10 @@ mod tests {
                 s.low_motion,
                 "{var}={val:?} must enable low_motion to prevent flickering in SSH sessions (#1433)"
             );
+            assert!(
+                !s.fancy_animations,
+                "{var}={val:?} must disable fancy_animations in SSH sessions (#1433)"
+            );
         }
         // SAFETY: cleanup under the guard.
         unsafe {
