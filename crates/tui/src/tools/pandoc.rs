@@ -1,5 +1,5 @@
 //! `pandoc_convert` tool — universal document conversion via the
-//! `pandoc` binary (https://pandoc.org).
+//! `pandoc` binary (<https://pandoc.org>).
 //!
 //! Pandoc is the de-facto Swiss Army knife for moving prose between
 //! the formats writers and engineers actually use: Markdown to HTML,

@@ -295,7 +295,7 @@ impl ToolSpec for WebSearchTool {
 }
 
 impl WebSearchTool {
-    /// Search via Tavily AI Search API (https://tavily.com).
+    /// Search via Tavily AI Search API (<https://tavily.com>).
     async fn run_tavily_search(
         &self,
         query: &str,
@@ -392,7 +392,7 @@ impl WebSearchTool {
         ToolResult::json(&response).map_err(|e| ToolError::execution_failed(e.to_string()))
     }
 
-    /// Search via Bocha AI Search API (https://bochaai.com).
+    /// Search via Bocha AI Search API (<https://bochaai.com>).
     async fn run_bocha_search(
         &self,
         query: &str,

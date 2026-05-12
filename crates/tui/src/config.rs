@@ -513,9 +513,9 @@ pub enum SearchProvider {
     #[default]
     #[serde(alias = "duckduckgo")]
     DuckDuckGo,
-    /// Tavily AI Search API (https://tavily.com). Requires api_key.
+    /// Tavily AI Search API (<https://tavily.com>). Requires api_key.
     Tavily,
-    /// Bocha AI Search API (https://bochaai.com). Requires api_key.
+    /// Bocha AI Search API (<https://bochaai.com>). Requires api_key.
     Bocha,
 }
 
