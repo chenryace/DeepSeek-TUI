@@ -71,6 +71,7 @@ mod test_support;
 mod tools;
 mod tui;
 mod utils;
+mod vision;
 mod working_set;
 mod workspace_trust;
 
@@ -4442,6 +4443,7 @@ async fn run_exec_agent(
         subagent_model_overrides: config.subagent_model_overrides(),
         memory_enabled: config.memory_enabled(),
         memory_path: config.memory_path(),
+        vision_config: config.vision_model_config(),
         strict_tool_mode: config.strict_tool_mode.unwrap_or(false),
         goal_objective: None,
         locale_tag: crate::localization::resolve_locale(

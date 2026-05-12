@@ -39,6 +39,24 @@ real world uses."
 
 ### Added
 
+- **`image_analyze` tool — vision-model image understanding**
+  (harvested from PR #1467 by **@MMMarcinho**). Sends an image
+  file to an OpenAI-compatible vision endpoint and returns the
+  model's natural-language description. Complements `image_ocr`:
+  use `image_ocr` for "what text is on this image", `image_analyze`
+  for "what is this image about". **Opt-in only** — gated by both
+  the `[features] vision_model = true` flag and a `[vision_model]`
+  config block specifying `model` (and optionally `api_key` /
+  `base_url`). Default configuration ships the feature flag at
+  `false`, so no install sees vision API calls fire without an
+  explicit two-step opt-in. **Billing**: each call hits the
+  configured vision endpoint (OpenAI by default), so usage is
+  billed by the third-party provider; calls are stateless (no
+  conversation context attached). Workspace-boundary check: the
+  tool rejects absolute paths and any `..` parent-dir traversal
+  before any base64 encoding or API call. To disable later: set
+  `[features] vision_model = false` (or omit `[vision_model]`).
+  Supports PNG, JPEG, GIF, WebP, and BMP inputs.
 - **`image_ocr` tool — extract text from images via local
   tesseract.** Lets the model OCR a screenshot, scanned receipt,
   whiteboard photo, or image-only PDF the user drops into the
