@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Termius and every SSH session auto-enable low-motion**
+  (#1433, harvested from PR #1479 by **@CrepuscularIRIS / autoghclaw**).
+  Termius desktop sets `TERM_PROGRAM=Termius`; sshd exports
+  `SSH_CLIENT` for every TCP session and `SSH_TTY` for interactive
+  PTY logins. Any of those signals now flips `low_motion` and
+  `fancy_animations` like the existing VS Code / Ghostty path, so
+  the 120 FPS cursor-repositioning that races the SSH round-trip
+  no longer flickers a remote TUI. Disk-loaded `fancy_animations =
+  true` is unconditionally overridden under these signals,
+  matching the existing env-precedence contract.
 - **DEC 2026 synchronized output is auto-disabled on Ptyxis** (the new
   default terminal on Ubuntu 26.04 and an increasingly common Linux
   TUI host). Ptyxis 50.x ships on VTE 0.84.x, which parses the

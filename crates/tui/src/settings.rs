@@ -370,6 +370,25 @@ impl Settings {
             self.fancy_animations = false;
         }
 
+        // Termius (TERM_PROGRAM=Termius) and SSH sessions exhibit the
+        // same 120-FPS flicker class as VS Code — the SSH round-trip
+        // races ahead of what the remote renderer can flush, so rapid
+        // cursor-positioning sequences cycle through input boxes.
+        // Drop both to the 30 FPS low-motion cap. Harvested from
+        // PR #1479 by @CrepuscularIRIS / autoghclaw (closes #1433).
+        //
+        // SSH_CLIENT is exported by sshd for every TCP SSH session;
+        // SSH_TTY is exported only for interactive PTY logins, so we
+        // check both so non-PTY-allocating tools (rsync wrappers, etc.)
+        // still pick this up if they end up running the TUI.
+        let term_is_termius = std::env::var("TERM_PROGRAM").as_deref() == Ok("Termius");
+        let in_ssh_session = std::env::var_os("SSH_CLIENT").is_some_and(|v| !v.is_empty())
+            || std::env::var_os("SSH_TTY").is_some_and(|v| !v.is_empty());
+        if term_is_termius || in_ssh_session {
+            self.low_motion = true;
+            self.fancy_animations = false;
+        }
+
         // Ptyxis 50.x (the new default terminal on Ubuntu 26.04) ships with
         // VTE 0.84.x which mishandles DEC mode 2026 synchronized output: the
         // begin/end pair is parsed but each wrapped frame still triggers a
@@ -1138,6 +1157,16 @@ mod tests {
     fn non_vscode_term_program_does_not_force_low_motion() {
         let _g = term_program_test_guard();
         let prev = std::env::var_os("TERM_PROGRAM");
+        let prev_ssh_client = std::env::var_os("SSH_CLIENT");
+        let prev_ssh_tty = std::env::var_os("SSH_TTY");
+        // SAFETY: serialised by the guard. Clear SSH_* so a real
+        // SSH session running the test suite doesn't make this
+        // assertion trivially fail — the SSH path is exercised
+        // separately by `ssh_session_forces_low_motion_on`.
+        unsafe {
+            std::env::remove_var("SSH_CLIENT");
+            std::env::remove_var("SSH_TTY");
+        }
         for program in ["iTerm.app", "Apple_Terminal", "WezTerm", "xterm-256color"] {
             // SAFETY: serialised by the guard.
             unsafe {
@@ -1153,6 +1182,89 @@ mod tests {
         // SAFETY: cleanup under the guard.
         unsafe {
             match prev {
+                Some(v) => std::env::set_var("TERM_PROGRAM", v),
+                None => std::env::remove_var("TERM_PROGRAM"),
+            }
+            if let Some(v) = prev_ssh_client {
+                std::env::set_var("SSH_CLIENT", v);
+            }
+            if let Some(v) = prev_ssh_tty {
+                std::env::set_var("SSH_TTY", v);
+            }
+        }
+    }
+
+    #[test]
+    fn termius_term_program_forces_low_motion_on() {
+        let _g = term_program_test_guard();
+        let prev = std::env::var_os("TERM_PROGRAM");
+        // SAFETY: serialised by the guard.
+        unsafe {
+            std::env::set_var("TERM_PROGRAM", "Termius");
+        }
+        let mut settings = Settings::default();
+        assert!(!settings.low_motion, "default is animated");
+        settings.apply_env_overrides();
+        assert!(
+            settings.low_motion,
+            "TERM_PROGRAM=Termius must enable low_motion to prevent flickering (#1433)"
+        );
+        assert!(
+            !settings.fancy_animations,
+            "TERM_PROGRAM=Termius must disable fancy_animations"
+        );
+        // SAFETY: cleanup under the guard.
+        unsafe {
+            match prev {
+                Some(v) => std::env::set_var("TERM_PROGRAM", v),
+                None => std::env::remove_var("TERM_PROGRAM"),
+            }
+        }
+    }
+
+    #[test]
+    fn ssh_session_forces_low_motion_on() {
+        let _g = term_program_test_guard();
+        let prev_client = std::env::var_os("SSH_CLIENT");
+        let prev_tty = std::env::var_os("SSH_TTY");
+        let prev_term_program = std::env::var_os("TERM_PROGRAM");
+        for (var, val) in [
+            ("SSH_CLIENT", "192.168.1.100 50000 22"),
+            ("SSH_TTY", "/dev/pts/0"),
+        ] {
+            // SAFETY: serialised by the guard.
+            unsafe {
+                std::env::remove_var("SSH_CLIENT");
+                std::env::remove_var("SSH_TTY");
+                // Clear TERM_PROGRAM so the test isolates the SSH signal
+                // — otherwise a leaked `TERM_PROGRAM=vscode` from a
+                // concurrent test would already have forced low_motion
+                // and the SSH-only assertion below would be a tautology.
+                std::env::remove_var("TERM_PROGRAM");
+                std::env::set_var(var, val);
+            }
+            let mut s = Settings::default();
+            s.apply_env_overrides();
+            assert!(
+                s.low_motion,
+                "{var}={val:?} must enable low_motion to prevent flickering in SSH sessions (#1433)"
+            );
+            assert!(
+                !s.fancy_animations,
+                "{var}={val:?} must disable fancy_animations in SSH sessions (#1433)"
+            );
+        }
+        // SAFETY: cleanup under the guard.
+        unsafe {
+            std::env::remove_var("SSH_CLIENT");
+            std::env::remove_var("SSH_TTY");
+            if let Some(v) = prev_client {
+                std::env::set_var("SSH_CLIENT", v);
+            }
+            if let Some(v) = prev_tty {
+                std::env::set_var("SSH_TTY", v);
+            }
+            match prev_term_program {
                 Some(v) => std::env::set_var("TERM_PROGRAM", v),
                 None => std::env::remove_var("TERM_PROGRAM"),
             }
