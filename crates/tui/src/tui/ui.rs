@@ -2370,6 +2370,7 @@ async fn run_event_loop(
 
             if !app.view_stack.is_empty() {
                 let events = app.view_stack.handle_key(key);
+                app.needs_redraw = true;
                 if handle_view_events(
                     terminal,
                     app,
