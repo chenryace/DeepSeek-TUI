@@ -13,6 +13,11 @@ A post-0.8.34 cleanup release focused on prompt hygiene, context-pressure
 guidance, and keeping the next release branch clearly separated from the
 already-published v0.8.34 tag.
 
+> **Note on v0.8.34 contributor credits:** Horace Liu ([@liuhq](https://github.com/liuhq))
+> contributed Nix package support and install documentation in the v0.8.34
+> cycle but was inadvertently omitted from that release's changelog. The
+> README contributor list and this note correct the record.
+
 ### Changed
 
 - **First-turn prompt context is leaner and easier to audit.** The
