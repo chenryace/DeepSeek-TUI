@@ -427,7 +427,6 @@ impl BackgroundShell {
     }
 
     /// Kill the process
-    #[allow(dead_code)]
     fn kill(&mut self) -> Result<()> {
         if let Some(ref mut child) = self.child {
             child.kill().context("Failed to kill process")?;
@@ -1250,7 +1249,6 @@ impl ShellManager {
     }
 
     /// Kill a running background process
-    #[allow(dead_code)]
     pub fn kill(&mut self, task_id: &str) -> Result<ShellResult> {
         let shell = self
             .processes

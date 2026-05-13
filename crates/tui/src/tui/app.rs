@@ -4069,6 +4069,7 @@ pub enum ShellJobAction {
     Cancel {
         id: String,
     },
+    CancelAll,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

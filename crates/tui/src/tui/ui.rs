@@ -2287,6 +2287,19 @@ async fn run_event_loop(
             }
 
             if key.code == KeyCode::Char('k') && key.modifiers.contains(KeyModifiers::CONTROL) {
+                if app.view_stack.is_empty()
+                    && app.sidebar_focus == SidebarFocus::Tasks
+                    && app
+                        .task_panel
+                        .iter()
+                        .any(|task| task.id.starts_with("shell_") && task.status == "running")
+                {
+                    app.input = "/jobs cancel-all".to_string();
+                    app.cursor_position = app.input.len();
+                    app.status_message =
+                        Some("Press Enter to kill all running shell jobs".to_string());
+                    continue;
+                }
                 // When the composer is the active input target (no modal/pager
                 // intercepting keys), Ctrl+K performs an emacs-style kill to
                 // end-of-line. If the kill is a no-op (cursor at end of empty
@@ -5697,6 +5710,24 @@ fn handle_shell_job_action(app: &mut App, action: crate::tui::app::ShellJobActio
         crate::tui::app::ShellJobAction::Cancel { id } => match manager.kill(&id) {
             Ok(result) => add_shell_job_message(app, format_shell_poll(&result)),
             Err(err) => add_shell_job_message(app, format!("Shell job cancel failed: {err}")),
+        },
+        crate::tui::app::ShellJobAction::CancelAll => match manager.kill_running() {
+            Ok(results) => {
+                let count = results.len();
+                if count == 0 {
+                    add_shell_job_message(app, "No running shell jobs to cancel.".to_string());
+                } else {
+                    let tasks: Vec<String> = results
+                        .iter()
+                        .filter_map(|result| result.task_id.clone())
+                        .collect();
+                    add_shell_job_message(
+                        app,
+                        format!("Killed {count} shell job(s): {}", tasks.join(", ")),
+                    );
+                }
+            }
+            Err(err) => add_shell_job_message(app, format!("Shell job cancel-all failed: {err}")),
         },
     }
 }

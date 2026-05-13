@@ -611,6 +611,19 @@ fn task_panel_lines(app: &App, content_width: usize, max_rows: usize) -> Vec<Lin
                 Style::default().fg(palette::TEXT_DIM),
             )));
         }
+
+        if lines.len() < max_rows
+            && background_rows
+                .iter()
+                .any(|task| task.id.starts_with("shell_") && task.status == "running")
+        {
+            lines.push(Line::from(Span::styled(
+                truncate_line_to_width("Ctrl+K -> /jobs cancel-all", content_width.max(1)),
+                Style::default()
+                    .fg(palette::TEXT_MUTED)
+                    .add_modifier(ratatui::style::Modifier::ITALIC),
+            )));
+        }
     }
 
     if lines.len() < max_rows {
