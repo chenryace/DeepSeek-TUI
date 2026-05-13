@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.35] - 2026-05-13
+
+A post-0.8.34 cleanup release focused on prompt hygiene, context-pressure
+guidance, and keeping the next release branch clearly separated from the
+already-published v0.8.34 tag.
+
+### Changed
+
+- **First-turn prompt context is leaner and easier to audit.** The
+  generated project context pack now ignores hidden tool/cache state,
+  balances top-level directories before descending, and `/context`
+  shows named prompt layers instead of a single opaque system blob.
+- **Model-visible prompt policy de-conflicted.** The base and mode
+  prompts no longer forbid useful `deepseek` CLI diagnostics, no
+  longer require checklists for simple one-step work, and align
+  long-session compaction guidance around the 60% suggestion threshold.
+- **Context-pressure guidance now has one split rule.** Manual
+  `/compact` suggestions start around 60% during sustained work, while
+  automatic replacement compaction remains an opt-in hard guardrail near
+  80% so DeepSeek V4 prefix-cache economics stay intact.
+- **The Tasks sidebar now ages out stale live-tool noise.** Completed
+  active tool rows linger briefly and then leave the right rail; very old
+  running shell rows collapse to a single row instead of occupying the
+  whole Tasks panel.
+
+### Fixed
+
+- **`auto_compact` settings help now reports the real default**, which
+  has been off since v0.8.11 to avoid unnecessary cache-prefix rewrites.
+
 ## [0.8.34] - 2026-05-13
 
 A polish, terminal-protocol, and internal-cleanup release. The model-facing
@@ -65,14 +95,6 @@ mega-files that had grown around the agent loop and TUI.
   (v0.8.6 era), `PROMPT_ANALYSIS.md`, and the redundant
   `DEPENDENCY_GRAPH.md` no longer ship in releases; `docs/ARCHITECTURE.md`
   remains the canonical crate-layout reference.
-- **First-turn prompt context is leaner and easier to audit.** The
-  generated project context pack now ignores hidden tool/cache state,
-  balances top-level directories before descending, and `/context`
-  shows named prompt layers instead of a single opaque system blob.
-- **Model-visible prompt policy de-conflicted.** The base and mode
-  prompts no longer forbid useful `deepseek` CLI diagnostics, no
-  longer require checklists for simple one-step work, and align
-  long-session compaction guidance around the 60% threshold.
 
 ### Fixed
 
@@ -4078,7 +4100,8 @@ Welcome — and thank you.
 - Hooks system and config profiles
 - Example skills and launch assets
 
-[Unreleased]: https://github.com/Hmbown/DeepSeek-TUI/compare/v0.8.34...HEAD
+[Unreleased]: https://github.com/Hmbown/DeepSeek-TUI/compare/v0.8.35...HEAD
+[0.8.35]: https://github.com/Hmbown/DeepSeek-TUI/compare/v0.8.34...v0.8.35
 [0.8.34]: https://github.com/Hmbown/DeepSeek-TUI/compare/v0.8.33...v0.8.34
 [0.8.33]: https://github.com/Hmbown/DeepSeek-TUI/compare/v0.8.32...v0.8.33
 [0.8.32]: https://github.com/Hmbown/DeepSeek-TUI/compare/v0.8.31...v0.8.32

@@ -987,6 +987,10 @@ pub struct App {
     /// virtual index can shift (orphan completions push real cells in
     /// between). Migrated into `tool_details_by_cell` on flush.
     pub active_tool_details: HashMap<String, ToolDetailRecord>,
+    /// Completion timestamps for entries still living inside `active_cell`.
+    /// The transcript keeps completed entries until turn flush, but the
+    /// sidebar can use these timestamps to let settled live rows expire.
+    pub active_tool_entry_completed_at: HashMap<usize, Instant>,
     /// Active exploring cell entry index (within `active_cell.entries`).
     /// `None` once the active cell flushes or no exploring entry exists.
     pub exploring_cell: Option<usize>,
@@ -1563,6 +1567,7 @@ impl App {
             active_cell: None,
             active_cell_revision: 0,
             active_tool_details: HashMap::new(),
+            active_tool_entry_completed_at: HashMap::new(),
             exploring_cell: None,
             exploring_entries: HashMap::new(),
             ignored_tool_calls: HashSet::new(),
@@ -2360,6 +2365,7 @@ impl App {
             self.exploring_cell = None;
             self.exploring_entries.clear();
             self.active_tool_details.clear();
+            self.active_tool_entry_completed_at.clear();
             self.streaming_thinking_active_entry = None;
             self.bump_active_cell_revision();
             return;
@@ -2375,6 +2381,7 @@ impl App {
         let base_index = self.history.len();
 
         let mut details = std::mem::take(&mut self.active_tool_details);
+        self.active_tool_entry_completed_at.clear();
         for (tool_id, detail) in details.drain() {
             self.tool_details_by_cell
                 .entry(self.tool_cells.get(&tool_id).copied().unwrap_or(base_index))

@@ -241,34 +241,27 @@ deepseek --provider ollama --model deepseek-coder:1.3b
 
 ---
 
-## What's New In v0.8.34
+## What's New In v0.8.35
 
-A polish, terminal-protocol, and internal-cleanup release. The
-model-facing tool surface stays stable while v0.8.34 improves first-run
-skills, terminal notifications, prompt-cache visibility, MCP transport
-compatibility, and the maintainability of the largest TUI files.
+A post-release cleanup branch for the `v0.8.34` line. It keeps the
+model-facing surface stable while trimming first-turn context, clarifying
+context-pressure behavior, and reducing sidebar noise during long runs.
 [Full changelog](CHANGELOG.md).
 
-- **Bundled DeepSeek-native workflow skills.** Fresh installs now get
-  first-party skills for delegation, skill creation, MCP/plugin setup,
-  documents, presentations, spreadsheets, PDFs, and Feishu/Lark.
-- **User skills stay visible.** `/skills` separates user-created skills
-  from built-ins so workspace and global skills do not disappear behind
-  the bundled catalog.
-- **MCP HTTP defaults are more compatible.** Streamable HTTP requests
-  default to `Accept: application/json, text/event-stream` and preserve
-  `Mcp-Session-Id` across requests.
-- **Terminal notifications cover more terminals.** Kitty `OSC 99` and
-  Ghostty `OSC 777` join the existing notification paths.
-- **Prefix-cache stability is visible.** The footer surfaces cache
-  stability so users can notice cache-busting changes before cost climbs.
-- **`edit_file` handles typographic punctuation drift.** With
-  `fuzz: true`, smart quotes, en/em dashes, and non-breaking spaces no
-  longer prevent a safe replacement when the file uses ASCII punctuation.
-- **Large internals are getting smaller.** Focused modules now own
-  auto-routing, Vim-mode handling, workspace context, streaming thinking,
-  notifications, file-picker relevance, formatting helpers, and key
-  shortcut predicates.
+- **First-turn context is leaner.** Hidden tool/cache state is excluded
+  from the generated project pack, and `/context` now names prompt layers
+  instead of showing one opaque blob.
+- **Prompt rules are de-conflicted.** Useful `deepseek` diagnostics are
+  allowed, simple one-step work no longer forces checklist ceremony, and
+  sustained sessions consistently suggest `/compact` around 60%.
+- **Automatic compaction stays conservative.** The 80% threshold remains
+  an opt-in hard guardrail so DeepSeek V4 prefix-cache behavior is not
+  disturbed by default.
+- **The Tasks sidebar settles down.** Completed live-tool rows expire
+  after a short linger, and very old running shell rows collapse instead
+  of filling the right rail.
+- **`auto_compact` help is honest.** Settings now report the real default:
+  off.
 
 ---
 

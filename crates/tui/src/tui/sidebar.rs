@@ -5,6 +5,7 @@
 //! reads from `App` snapshots; mutation lives in the main app loop.
 
 use std::fmt::Write;
+use std::time::Duration;
 
 use ratatui::{
     Frame,
@@ -31,6 +32,8 @@ use super::ui::truncate_line_to_width;
 /// does not prematurely hide the session+agents breakdown.
 const COST_EQ_TOLERANCE: f64 = 1e-6;
 const RECENT_TOOL_SCAN_LIMIT: usize = 24;
+const ACTIVE_TOOL_COMPLETED_ROW_TTL: Duration = Duration::from_secs(8);
+const ACTIVE_TOOL_STALE_RUNNING_ROW_TTL: Duration = Duration::from_secs(600);
 
 pub fn render_sidebar(f: &mut Frame, area: Rect, app: &App) {
     if area.width < 24 || area.height < 8 {
@@ -660,12 +663,78 @@ fn active_tool_rows(app: &App) -> Vec<SidebarToolRow> {
     let Some(active) = app.active_cell.as_ref() else {
         return Vec::new();
     };
-    let rows: Vec<SidebarToolRow> = active
-        .entries()
-        .iter()
-        .filter_map(sidebar_tool_row_from_cell)
-        .collect();
+    let mut rows: Vec<SidebarToolRow> = Vec::new();
+    let mut stale_running: Vec<SidebarToolRow> = Vec::new();
+    for (entry_idx, cell) in active.entries().iter().enumerate() {
+        let Some(row) = sidebar_tool_row_from_cell(cell) else {
+            continue;
+        };
+        match active_tool_row_visibility(app, entry_idx, &row) {
+            ActiveToolRowVisibility::Visible => rows.push(row),
+            ActiveToolRowVisibility::StaleRunning => stale_running.push(row),
+            ActiveToolRowVisibility::Hidden => {}
+        }
+    }
+    if !stale_running.is_empty() {
+        rows.push(collapsed_stale_running_row(stale_running));
+    }
     editorial_tool_rows(rows, usize::MAX)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ActiveToolRowVisibility {
+    Visible,
+    StaleRunning,
+    Hidden,
+}
+
+fn active_tool_row_visibility(
+    app: &App,
+    entry_idx: usize,
+    row: &SidebarToolRow,
+) -> ActiveToolRowVisibility {
+    if row.status == ToolStatus::Running {
+        return if row
+            .duration_ms
+            .is_some_and(|ms| ms >= duration_ms(ACTIVE_TOOL_STALE_RUNNING_ROW_TTL))
+        {
+            ActiveToolRowVisibility::StaleRunning
+        } else {
+            ActiveToolRowVisibility::Visible
+        };
+    }
+
+    let Some(completed_at) = app.active_tool_entry_completed_at.get(&entry_idx) else {
+        return ActiveToolRowVisibility::Hidden;
+    };
+    if completed_at.elapsed() <= ACTIVE_TOOL_COMPLETED_ROW_TTL {
+        ActiveToolRowVisibility::Visible
+    } else {
+        ActiveToolRowVisibility::Hidden
+    }
+}
+
+fn collapsed_stale_running_row(rows: Vec<SidebarToolRow>) -> SidebarToolRow {
+    let count = rows.len();
+    let oldest_ms = rows
+        .iter()
+        .filter_map(|row| row.duration_ms)
+        .max()
+        .unwrap_or_default();
+    let first_summary = rows
+        .iter()
+        .find_map(|row| (!row.summary.trim().is_empty()).then(|| row.summary.clone()))
+        .unwrap_or_else(|| "open Activity Detail".to_string());
+    SidebarToolRow {
+        name: if count == 1 {
+            "run".to_string()
+        } else {
+            format!("run x{count}")
+        },
+        status: ToolStatus::Running,
+        summary: format!("long-running · {first_summary}"),
+        duration_ms: (oldest_ms > 0).then_some(oldest_ms),
+    }
 }
 
 fn recent_tool_rows(app: &App, limit: usize) -> Vec<SidebarToolRow> {
@@ -1012,6 +1081,10 @@ fn format_duration_ms(ms: u64) -> String {
     } else {
         format!("{:.1}s", ms as f64 / 1000.0)
     }
+}
+
+fn duration_ms(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
 }
 
 fn render_sidebar_subagents(f: &mut Frame, area: Rect, app: &App) {
@@ -1489,9 +1562,10 @@ fn render_sidebar_section(
 #[cfg(test)]
 mod tests {
     use super::{
-        AutoSidebarPanel, AutoSidebarState, SidebarAgentRow, SidebarSubagentSummary,
-        SidebarWorkChecklistItem, SidebarWorkStrategyStep, SidebarWorkSummary, auto_sidebar_panels,
-        subagent_panel_lines, task_panel_lines, work_panel_empty_hint, work_panel_lines,
+        ACTIVE_TOOL_COMPLETED_ROW_TTL, ACTIVE_TOOL_STALE_RUNNING_ROW_TTL, AutoSidebarPanel,
+        AutoSidebarState, SidebarAgentRow, SidebarSubagentSummary, SidebarWorkChecklistItem,
+        SidebarWorkStrategyStep, SidebarWorkSummary, auto_sidebar_panels, subagent_panel_lines,
+        task_panel_lines, work_panel_empty_hint, work_panel_lines,
     };
     use crate::config::Config;
     use crate::palette::PaletteMode;
@@ -1504,6 +1578,7 @@ mod tests {
     };
     use ratatui::text::Line;
     use std::path::PathBuf;
+    use std::time::{Duration, Instant};
 
     fn create_test_app() -> App {
         let options = TuiOptions {
@@ -1725,6 +1800,100 @@ mod tests {
         assert!(
             text.iter().any(|line| line.contains("[x] read_file")),
             "recent read_file row missing: {text:?}"
+        );
+    }
+
+    #[test]
+    fn tasks_panel_expires_completed_active_tool_rows() {
+        let mut app = create_test_app();
+        let mut active = ActiveCell::new();
+        active.push_tool(
+            "tool-1",
+            HistoryCell::Tool(ToolCell::Generic(GenericToolCell {
+                name: "read_file".to_string(),
+                status: ToolStatus::Success,
+                input_summary: Some("src/main.rs".to_string()),
+                output: Some("done".to_string()),
+                prompts: None,
+                spillover_path: None,
+                output_summary: Some("done".to_string()),
+                is_diff: false,
+            })),
+        );
+        app.active_cell = Some(active);
+        app.active_tool_entry_completed_at.insert(
+            0,
+            Instant::now() - ACTIVE_TOOL_COMPLETED_ROW_TTL - Duration::from_secs(1),
+        );
+
+        let text = lines_to_text(&task_panel_lines(&app, 64, 8));
+
+        assert!(
+            !text.iter().any(|line| line.contains("[x] read_file")),
+            "expired completed active row should leave the sidebar: {text:?}"
+        );
+    }
+
+    #[test]
+    fn tasks_panel_lingers_fresh_completed_active_tool_rows() {
+        let mut app = create_test_app();
+        let mut active = ActiveCell::new();
+        active.push_tool(
+            "tool-1",
+            HistoryCell::Tool(ToolCell::Generic(GenericToolCell {
+                name: "read_file".to_string(),
+                status: ToolStatus::Success,
+                input_summary: Some("src/main.rs".to_string()),
+                output: Some("done".to_string()),
+                prompts: None,
+                spillover_path: None,
+                output_summary: Some("done".to_string()),
+                is_diff: false,
+            })),
+        );
+        app.active_cell = Some(active);
+        app.active_tool_entry_completed_at.insert(0, Instant::now());
+
+        let text = lines_to_text(&task_panel_lines(&app, 64, 8));
+
+        assert!(
+            text.iter().any(|line| line.contains("[x] read_file")),
+            "fresh completed active row should linger briefly: {text:?}"
+        );
+    }
+
+    #[test]
+    fn tasks_panel_collapses_stale_running_tool_rows() {
+        let mut app = create_test_app();
+        let mut active = ActiveCell::new();
+        for (idx, command) in ["long one", "long two"].into_iter().enumerate() {
+            active.push_tool(
+                format!("shell-{idx}"),
+                HistoryCell::Tool(ToolCell::Exec(ExecCell {
+                    command: command.to_string(),
+                    status: ToolStatus::Running,
+                    output: None,
+                    started_at: Some(
+                        Instant::now() - ACTIVE_TOOL_STALE_RUNNING_ROW_TTL - Duration::from_secs(1),
+                    ),
+                    duration_ms: None,
+                    source: ExecSource::Assistant,
+                    interaction: None,
+                    output_summary: None,
+                })),
+            );
+        }
+        app.active_cell = Some(active);
+
+        let text = lines_to_text(&task_panel_lines(&app, 80, 8));
+
+        assert!(
+            text.iter().any(|line| line.contains("[~] run x2")),
+            "stale running rows should collapse into one sidebar row: {text:?}"
+        );
+        assert!(
+            !text.iter().any(|line| line.contains("long two")),
+            "second stale command should not take another row: {text:?}"
         );
     }
 

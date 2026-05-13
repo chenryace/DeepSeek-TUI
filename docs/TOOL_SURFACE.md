@@ -15,7 +15,7 @@ chosen over the available shell equivalent. Companion to `crates/tui/src/prompts
   for the same backing operation are a model trap — the LLM will alternate
   between them and the cache hit rate suffers.
 
-## Current surface (v0.8.34)
+## Current surface (v0.8.35)
 
 ### File operations
 
@@ -269,7 +269,7 @@ rg -n '"handle_read"|"rlm_open"|"rlm_eval"|"rlm_configure"|"rlm_close"|"agent_op
 rg -n 'handle_read|rlm_open|rlm_eval|rlm_configure|rlm_close|agent_open|agent_eval|agent_close' docs crates/tui/src/prompts crates/tui/src/tools
 ```
 
-The canonical v0.8.34 live names are:
+The canonical v0.8.35 live names are:
 
 - `handle_read`
 - `rlm_open`, `rlm_eval`, `rlm_configure`, `rlm_close`

@@ -702,7 +702,7 @@ impl Settings {
         vec![
             (
                 "auto_compact",
-                "Auto-compact near context limit: on/off (default on)",
+                "Auto-compact near the hard context limit: on/off (default off)",
             ),
             ("calm_mode", "Calmer UI defaults: on/off"),
             (

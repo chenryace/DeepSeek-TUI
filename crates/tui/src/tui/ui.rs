@@ -6192,6 +6192,7 @@ fn apply_loaded_session(app: &mut App, config: &Config, session: &SavedSession) 
     app.tool_details_by_cell.clear();
     app.active_cell = None;
     app.active_tool_details.clear();
+    app.active_tool_entry_completed_at.clear();
     app.active_cell_revision = app.active_cell_revision.wrapping_add(1);
     app.exploring_cell = None;
     app.exploring_entries.clear();
