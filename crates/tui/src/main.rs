@@ -4809,24 +4809,27 @@ async fn run_exec_agent(
                     }
                 }
             },
-            Event::AgentSpawned { id, prompt } => {
-                if output_format == ExecOutputFormat::Text && !json_output {
-                    eprintln!("sub-agent {id} spawned: {}", summarize_tool_output(&prompt));
-                }
+            Event::AgentSpawned { id, prompt }
+                if output_format == ExecOutputFormat::Text && !json_output =>
+            {
+                eprintln!("sub-agent {id} spawned: {}", summarize_tool_output(&prompt));
             }
-            Event::AgentProgress { id, status } => {
-                if output_format == ExecOutputFormat::Text && !json_output {
-                    eprintln!("sub-agent {id}: {status}");
-                }
+            Event::AgentProgress { id, status }
+                if output_format == ExecOutputFormat::Text && !json_output =>
+            {
+                eprintln!("sub-agent {id}: {status}");
             }
-            Event::AgentComplete { id, result } => {
-                if output_format == ExecOutputFormat::Text && !json_output {
-                    eprintln!(
-                        "sub-agent {id} completed: {}",
-                        summarize_tool_output(&result)
-                    );
-                }
+            Event::AgentComplete { id, result }
+                if output_format == ExecOutputFormat::Text && !json_output =>
+            {
+                eprintln!(
+                    "sub-agent {id} completed: {}",
+                    summarize_tool_output(&result)
+                );
             }
+            Event::AgentSpawned { .. }
+            | Event::AgentProgress { .. }
+            | Event::AgentComplete { .. } => {}
             Event::ApprovalRequired { id, .. } => {
                 if auto_approve {
                     let _ = engine_handle.approve_tool_call(id).await;
