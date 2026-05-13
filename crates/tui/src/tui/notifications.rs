@@ -1,9 +1,15 @@
-//! OSC 9 / BEL desktop notifications for long agent-turn completion.
+//! Desktop notifications for turn completion.
 //!
-//! Writes a terminal escape to the provided sink (or stdout for the public
-//! API) when a turn takes longer than the configured threshold. Supports
-//! tmux DCS passthrough so OSC 9 reaches the outer terminal even when
-//! running inside a tmux session.
+//! Supports five delivery mechanisms:
+//! - **OSC 9** — terminal escape sequence (`\x1b]9;…\x07`) for iTerm2,
+//!   Ghostty, WezTerm, and tmux (with DCS passthrough).
+//! - **Kitty** — OSC 99 protocol with ST terminator (no audible beep).
+//! - **Ghostty** — OSC 777 notification protocol.
+//! - **BEL** — audible bell (`\x07`) as a last-resort fallback.
+//!
+//! When `method = "auto"`, the resolver picks the best method for the
+//! current terminal; Windows falls back to `Off` to avoid the error chime
+//! (#583).
 
 #[cfg(target_os = "windows")]
 use windows::Win32::System::Diagnostics::Debug::MessageBeep;
@@ -16,20 +22,20 @@ use std::time::Duration;
 /// Notification delivery method.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Method {
-    /// Automatically pick `Osc9` for known capable terminals
-    /// (`iTerm.app`, `Ghostty`, `WezTerm`); fall back to `Bel` on
-    /// macOS / Linux. On Windows the fallback is `Off` instead of
-    /// `Bel`, because the OS audio stack maps `\x07` to the
-    /// `SystemAsterisk` / `MB_OK` chime — the same sound used by
-    /// application error popups (#583). Windows users who want an
-    /// audible cue can opt in by setting
-    /// `[notifications].method = "bel"` explicitly.
+    /// Automatically pick the best protocol for the current terminal.
+    /// See [`resolve_method`] for the canonical resolution table.
     #[default]
     Auto,
     /// OSC 9 escape: `\x1b]9;<msg>\x07`
     Osc9,
     /// Plain BEL character: `\x07`
     Bel,
+    /// Kitty notification protocol (OSC 99) with ST terminator.
+    /// Uses `ESC ] 99 ; params ST` — no audible beep, unlike BEL.
+    Kitty,
+    /// Ghostty notification protocol (OSC 777).
+    /// Uses `ESC ] 777 ; notify ; title ; message BEL`.
+    Ghostty,
     /// Suppress all notifications.
     Off,
 }
@@ -49,53 +55,70 @@ fn windows_bell() {
     }
 }
 
-/// Resolve `Auto` to a concrete method by inspecting `$TERM_PROGRAM` and
-/// `$LC_TERMINAL`.
+/// Resolve `Auto` to a concrete method by inspecting `$TERM_PROGRAM`,
+/// `$LC_TERMINAL`, and `$TERM`.
 ///
-/// Known OSC-9 capable programs: `iTerm.app`, `Ghostty`, `WezTerm`, `Cmux`
-/// (these resolve to `Osc9` on every platform, including Windows
-/// when running inside WezTerm).
-///
-/// The probe order is: `$TERM_PROGRAM` first, then `$LC_TERMINAL` as a
-/// fallback for terminals (e.g. Cmux) that set `LC_TERMINAL` instead of
-/// `TERM_PROGRAM`. If neither env var matches a known OSC-9 capable terminal,
-/// the fallback is platform-dependent:
-/// - **macOS / Linux / other Unix:** `Bel` (a single `\x07` byte).
-/// - **Windows:** `Off`. BEL is mapped by the Windows audio stack
-///   to `SystemAsterisk` / `MB_OK`, the same chime used by
-///   application error popups, so it sounds like an error
-///   notification even though the turn completed successfully (#583).
-///   Users can opt back in with `[notifications].method = "bel"` or
-///   pick a known OSC-9 terminal.
-///
-/// Terminals that set neither env var (e.g. Cmux in some configurations)
-/// can force OSC 9 with `[notifications].method = "osc9"` in the config file.
+/// Resolution table:
+/// - `iTerm.app`, `WezTerm`, `Cmux` → `Osc9`
+/// - `Ghostty` → `Ghostty` (OSC 777)
+/// - `kitty` → `Kitty` (OSC 99)
+/// - `$LC_TERMINAL` matches OSC-9 capable → `Osc9` (Cmux that sets LC_TERMINAL)
+/// - `$TERM` contains `ghostty` → `Osc9` (cmux etc.)
+/// - `$TERM` contains `kitty` → `Kitty`
+/// - Unix unknown → `Bel`
+/// - Windows unknown → `Off`
 #[must_use]
 fn resolve_method() -> Method {
-    const OSC9_TERMINALS: &[&str] = &["iTerm.app", "Ghostty", "WezTerm", "Cmux"];
-
     let term_program = std::env::var("TERM_PROGRAM").unwrap_or_default();
-    if OSC9_TERMINALS.contains(&term_program.as_str()) {
-        return Method::Osc9;
+    match term_program.as_str() {
+        "iTerm.app" | "WezTerm" | "Cmux" => return Method::Osc9,
+        "Ghostty" => return Method::Ghostty,
+        "kitty" => return Method::Kitty,
+        _ => {}
     }
 
+    // LC_TERMINAL fallback for terminals (e.g. Cmux) that set
+    // LC_TERMINAL instead of TERM_PROGRAM.
     let lc_terminal = std::env::var("LC_TERMINAL").unwrap_or_default();
-    if OSC9_TERMINALS.contains(&lc_terminal.as_str()) {
-        return Method::Osc9;
+    match lc_terminal.as_str() {
+        "iTerm.app" | "Ghostty" | "WezTerm" | "Cmux" => return Method::Osc9,
+        _ => {}
     }
 
     if cfg!(target_os = "windows") {
-        Method::Off
+        return Method::Off;
+    }
+
+    // Ghostty-based terminals (cmux, etc.) may not set their own
+    // TERM_PROGRAM but do set TERM=xterm-ghostty. Likewise for Kitty.
+    let term = std::env::var("TERM").unwrap_or_default();
+    if term.contains("ghostty") {
+        Method::Osc9
+    } else if term.contains("kitty") {
+        Method::Kitty
     } else {
         Method::Bel
     }
 }
 
+/// Wrap an escape sequence for terminal multiplexer passthrough.
+///
+/// tmux intercepts escape sequences; DCS passthrough tunnels them to
+/// the outer terminal unmodified. Every ESC inside the payload is
+/// doubled so tmux does not interpret it as DCS end.
+fn wrap_for_multiplexer(seq: &str, in_tmux: bool) -> String {
+    if in_tmux {
+        let escaped = seq.replace('\x1b', "\x1b\x1b");
+        format!("\x1bPtmux;{escaped}\x1b\\")
+    } else {
+        seq.to_string()
+    }
+}
+
 /// Build the raw escape bytes for the given method and message.
 ///
-/// When `in_tmux` is `true` and the method is `Osc9`, the sequence is
-/// wrapped in a DCS passthrough so tmux forwards it to the outer terminal:
-/// `\x1bPtmux;\x1b<OSC-9>\x1b\\`
+/// When `in_tmux` is `true`, OSC sequences are wrapped in DCS passthrough
+/// so tmux forwards them to the outer terminal.
 #[must_use]
 fn build_escape(method: Method, in_tmux: bool, msg: &str) -> Vec<u8> {
     match method {
@@ -103,13 +126,25 @@ fn build_escape(method: Method, in_tmux: bool, msg: &str) -> Vec<u8> {
         Method::Osc9 => {
             let inner = format!("\x1b]9;{msg}\x07");
             if in_tmux {
-                // DCS passthrough: every ESC inside the payload must be
-                // doubled so tmux does not interpret it as DCS end.
                 let escaped_inner = inner.replace('\x1b', "\x1b\x1b");
                 format!("\x1bPtmux;{escaped_inner}\x1b\\").into_bytes()
             } else {
                 inner.into_bytes()
             }
+        }
+        Method::Kitty => {
+            // Kitty notification: OSC 99 ; params ST
+            // ST terminator (ESC \) instead of BEL to avoid audible beep.
+            let title_seq = "\x1b]99;d=0:p=title\x1b\\";
+            let body_seq = format!("\x1b]99;p=body;{msg}\x1b\\");
+            let focus_seq = "\x1b]99;d=1:a=focus\x1b\\";
+            let combined = format!("{title_seq}{body_seq}{focus_seq}");
+            wrap_for_multiplexer(&combined, in_tmux).into_bytes()
+        }
+        Method::Ghostty => {
+            // Ghostty notification: OSC 777 ; notify ; title ; message BEL
+            let seq = format!("\x1b]777;notify;DeepSeek TUI;{msg}\x07");
+            wrap_for_multiplexer(&seq, in_tmux).into_bytes()
         }
         // Auto and Off should not reach build_escape.
         Method::Auto | Method::Off => vec![],
@@ -155,13 +190,13 @@ pub fn notify_done_to<W: Write>(
 
 /// Emit a turn-complete notification to **stdout** if `elapsed >= threshold`.
 ///
-/// With `method = Auto`, selects `Osc9` for known capable terminals
-/// (`iTerm.app`, `Ghostty`, `WezTerm`); the unknown-terminal fallback is
-/// platform-aware — `Bel` on macOS / Linux, `Off` on Windows (where BEL
-/// maps to the `SystemAsterisk` / `MB_OK` error chime, #583). See
-/// [`resolve_method`] for the canonical resolution table. Pass
-/// `in_tmux = true` (i.e. `$TMUX` is non-empty at runtime) to wrap OSC 9
-/// in a DCS passthrough.
+/// With `method = Auto`, selects the best protocol for the current terminal
+/// (OSC 9, Kitty OSC 99, Ghostty OSC 777, or Bel). The unknown-terminal
+/// fallback is platform-aware — `Bel` on macOS / Linux, `Off` on Windows
+/// (where BEL maps to the `SystemAsterisk` / `MB_OK` error chime, #583).
+/// See [`resolve_method`] for the canonical resolution table. Pass
+/// `in_tmux = true` (i.e. `$TMUX` is non-empty at runtime) to wrap OSC
+/// sequences in a DCS passthrough.
 pub fn notify_done(
     method: Method,
     in_tmux: bool,
@@ -286,6 +321,41 @@ mod tests {
     }
 
     #[test]
+    fn kitty_escape_uses_st_terminator() {
+        let out = capture(Method::Kitty, false, "done", 0, 1);
+        let s = String::from_utf8(out).unwrap();
+        assert!(s.contains("99;"), "should have kitty OSC 99");
+        assert!(s.contains("\x1b\\"), "kitty uses ST terminator");
+        assert!(!s.contains("\x07"), "kitty should NOT use BEL");
+    }
+
+    #[test]
+    fn ghostty_escape_format() {
+        let out = capture(Method::Ghostty, false, "done", 0, 1);
+        let s = String::from_utf8(out).unwrap();
+        assert!(
+            s.contains("777;notify;DeepSeek TUI;done"),
+            "should have ghostty seq"
+        );
+    }
+
+    #[test]
+    fn kitty_tmux_dcs_passthrough() {
+        let out = capture(Method::Kitty, true, "hello", 0, 1);
+        let s = String::from_utf8(out).unwrap();
+        assert!(s.starts_with("\x1bPtmux;"), "should start with DCS");
+        assert!(s.ends_with("\x1b\\"), "should end with ST");
+    }
+
+    #[test]
+    fn ghostty_tmux_dcs_passthrough() {
+        let out = capture(Method::Ghostty, true, "hello", 0, 1);
+        let s = String::from_utf8(out).unwrap();
+        assert!(s.starts_with("\x1bPtmux;"), "should start with DCS");
+        assert!(s.ends_with("\x1b\\"), "should end with ST");
+    }
+
+    #[test]
     fn below_threshold_emits_nothing() {
         let out = capture(Method::Osc9, false, "msg", 30, 29);
         assert!(out.is_empty());
@@ -388,13 +458,15 @@ mod tests {
         let _lock = env_lock();
         let prev_tp = std::env::var_os("TERM_PROGRAM");
         let prev_lc = std::env::var_os("LC_TERMINAL");
+        let prev_term = std::env::var_os("TERM");
         // SAFETY: test-only; serialised by env_lock().
-        // Clear LC_TERMINAL so the LC_TERMINAL fallback probe does not
-        // accidentally pick up an OSC-9 capable terminal from the test runner
-        // environment and shadow the Bel fallback we're trying to verify.
+        // Clear LC_TERMINAL and TERM so the fallback probes don't
+        // accidentally pick up an OSC-9 / Kitty / Ghostty capable
+        // terminal from the test runner environment.
         unsafe {
             std::env::set_var("TERM_PROGRAM", "xterm-256color");
             std::env::remove_var("LC_TERMINAL");
+            std::env::set_var("TERM", "xterm-256color");
         }
         let resolved = resolve_method();
         // SAFETY: test-only; serialised by env_lock().
@@ -406,6 +478,10 @@ mod tests {
             match prev_lc {
                 Some(v) => std::env::set_var("LC_TERMINAL", v),
                 None => std::env::remove_var("LC_TERMINAL"),
+            }
+            match prev_term {
+                Some(v) => std::env::set_var("TERM", v),
+                None => std::env::remove_var("TERM"),
             }
         }
         assert_eq!(resolved, Method::Bel);
@@ -455,6 +531,143 @@ mod tests {
             }
         }
         assert_eq!(resolved, Method::Osc9);
+    }
+
+    /// Ghostty-based terminals (cmux, etc.) may not set
+    /// `TERM_PROGRAM` but do set `TERM=xterm-ghostty`. The `$TERM`
+    /// fallback should catch them.
+    #[test]
+    #[cfg(not(target_os = "windows"))]
+    fn auto_detect_picks_osc9_for_xterm_ghostty_term_fallback() {
+        let _lock = env_lock();
+        let prev_tp = std::env::var_os("TERM_PROGRAM");
+        let prev_lc = std::env::var_os("LC_TERMINAL");
+        let prev_term = std::env::var_os("TERM");
+        // Simulate a Ghostty-based terminal that only sets TERM.
+        // SAFETY: test-only; serialised by env_lock().
+        unsafe {
+            std::env::remove_var("TERM_PROGRAM");
+            std::env::remove_var("LC_TERMINAL");
+            std::env::set_var("TERM", "xterm-ghostty");
+        }
+        let resolved = resolve_method();
+        // SAFETY: test-only; serialised by env_lock().
+        unsafe {
+            match prev_tp {
+                Some(v) => std::env::set_var("TERM_PROGRAM", v),
+                None => std::env::remove_var("TERM_PROGRAM"),
+            }
+            match prev_lc {
+                Some(v) => std::env::set_var("LC_TERMINAL", v),
+                None => std::env::remove_var("LC_TERMINAL"),
+            }
+            match prev_term {
+                Some(v) => std::env::set_var("TERM", v),
+                None => std::env::remove_var("TERM"),
+            }
+        }
+        assert_eq!(resolved, Method::Osc9);
+    }
+
+    /// Ghostty now has its own protocol (OSC 777).
+    #[test]
+    fn auto_detect_picks_ghostty_from_term_program() {
+        let _lock = env_lock();
+        let prev = std::env::var_os("TERM_PROGRAM");
+        // SAFETY: test-only; serialised by env_lock().
+        unsafe { std::env::set_var("TERM_PROGRAM", "Ghostty") };
+        let resolved = resolve_method();
+        // SAFETY: test-only; serialised by env_lock().
+        unsafe {
+            match prev {
+                Some(v) => std::env::set_var("TERM_PROGRAM", v),
+                None => std::env::remove_var("TERM_PROGRAM"),
+            }
+        }
+        assert_eq!(resolved, Method::Ghostty);
+    }
+
+    #[test]
+    fn auto_detect_picks_kitty_from_term_program() {
+        let _lock = env_lock();
+        let prev = std::env::var_os("TERM_PROGRAM");
+        // SAFETY: test-only; serialised by env_lock().
+        unsafe { std::env::set_var("TERM_PROGRAM", "kitty") };
+        let resolved = resolve_method();
+        // SAFETY: test-only; serialised by env_lock().
+        unsafe {
+            match prev {
+                Some(v) => std::env::set_var("TERM_PROGRAM", v),
+                None => std::env::remove_var("TERM_PROGRAM"),
+            }
+        }
+        assert_eq!(resolved, Method::Kitty);
+    }
+
+    #[test]
+    #[cfg(not(target_os = "windows"))]
+    fn auto_detect_picks_kitty_from_term_fallback() {
+        let _lock = env_lock();
+        let prev_tp = std::env::var_os("TERM_PROGRAM");
+        let prev_lc = std::env::var_os("LC_TERMINAL");
+        let prev_term = std::env::var_os("TERM");
+        // SAFETY: test-only; serialised by env_lock().
+        unsafe {
+            std::env::remove_var("TERM_PROGRAM");
+            std::env::remove_var("LC_TERMINAL");
+            std::env::set_var("TERM", "xterm-kitty");
+        }
+        let resolved = resolve_method();
+        // SAFETY: test-only; serialised by env_lock().
+        unsafe {
+            match prev_tp {
+                Some(v) => std::env::set_var("TERM_PROGRAM", v),
+                None => std::env::remove_var("TERM_PROGRAM"),
+            }
+            match prev_lc {
+                Some(v) => std::env::set_var("LC_TERMINAL", v),
+                None => std::env::remove_var("LC_TERMINAL"),
+            }
+            match prev_term {
+                Some(v) => std::env::set_var("TERM", v),
+                None => std::env::remove_var("TERM"),
+            }
+        }
+        assert_eq!(resolved, Method::Kitty);
+    }
+
+    /// When neither `TERM_PROGRAM` nor `TERM` suggests a known capable
+    /// terminal, the fallback on Unix is `Bel`.
+    #[test]
+    #[cfg(not(target_os = "windows"))]
+    fn auto_detect_falls_back_to_bel_for_unrelated_term() {
+        let _lock = env_lock();
+        let prev_tp = std::env::var_os("TERM_PROGRAM");
+        let prev_lc = std::env::var_os("LC_TERMINAL");
+        let prev_term = std::env::var_os("TERM");
+        // SAFETY: test-only; serialised by env_lock().
+        unsafe {
+            std::env::remove_var("TERM_PROGRAM");
+            std::env::remove_var("LC_TERMINAL");
+            std::env::set_var("TERM", "xterm-256color");
+        }
+        let resolved = resolve_method();
+        // SAFETY: test-only; serialised by env_lock().
+        unsafe {
+            match prev_tp {
+                Some(v) => std::env::set_var("TERM_PROGRAM", v),
+                None => std::env::remove_var("TERM_PROGRAM"),
+            }
+            match prev_lc {
+                Some(v) => std::env::set_var("LC_TERMINAL", v),
+                None => std::env::remove_var("LC_TERMINAL"),
+            }
+            match prev_term {
+                Some(v) => std::env::set_var("TERM", v),
+                None => std::env::remove_var("TERM"),
+            }
+        }
+        assert_eq!(resolved, Method::Bel);
     }
 
     #[test]
