@@ -5500,7 +5500,6 @@ fn draw_app_frame_inner(
     let result = (|| -> Result<()> {
         if full_repaint {
             terminal.backend_mut().write_all(TERMINAL_ORIGIN_RESET)?;
-            terminal.backend_mut().flush()?;
             terminal.clear()?;
         }
         terminal.draw(|f| render(f, app))?;
@@ -6308,7 +6307,6 @@ fn reset_terminal_viewport(terminal: &mut AppTerminal, sync_output_enabled: bool
 
     let result = (|| -> Result<()> {
         terminal.backend_mut().write_all(TERMINAL_ORIGIN_RESET)?;
-        terminal.backend_mut().flush()?;
         terminal.clear()?;
         Ok(())
     })();
