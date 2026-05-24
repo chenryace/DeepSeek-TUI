@@ -102,6 +102,9 @@ struct Cli {
     /// YOLO mode: auto-approve all tools
     #[arg(long)]
     yolo: bool,
+    /// Continue the most recent interactive session for this workspace.
+    #[arg(short = 'c', long = "continue")]
+    continue_session: bool,
     #[arg(short = 'p', long = "prompt", value_name = "PROMPT")]
     prompt_flag: Option<String>,
     #[arg(
@@ -555,24 +558,40 @@ fn run() -> Result<()> {
         Some(Commands::Update) => update::run_update(),
         None => {
             let resolved_runtime = resolve_runtime_for_dispatch(&mut store, &runtime_overrides);
-            let mut forwarded = Vec::new();
-            let prompt = cli.prompt_flag.iter().chain(cli.prompt.iter()).fold(
-                String::new(),
-                |mut acc, part| {
-                    if !acc.is_empty() {
-                        acc.push(' ');
-                    }
-                    acc.push_str(part);
-                    acc
-                },
-            );
-            if !prompt.is_empty() {
-                forwarded.push("--prompt".to_string());
-                forwarded.push(prompt);
-            }
+            let forwarded = root_tui_passthrough(&cli)?;
             delegate_to_tui(&cli, &resolved_runtime, forwarded)
         }
     }
+}
+
+fn root_tui_passthrough(cli: &Cli) -> Result<Vec<String>> {
+    let mut forwarded = Vec::new();
+    if cli.continue_session {
+        forwarded.push("--continue".to_string());
+    }
+
+    let prompt =
+        cli.prompt_flag
+            .iter()
+            .chain(cli.prompt.iter())
+            .fold(String::new(), |mut acc, part| {
+                if !acc.is_empty() {
+                    acc.push(' ');
+                }
+                acc.push_str(part);
+                acc
+            });
+    if !prompt.is_empty() {
+        if cli.continue_session {
+            bail!(
+                "`codewhale --continue` resumes the interactive TUI. Use `codewhale exec --continue <PROMPT>` to continue a session non-interactively."
+            );
+        }
+        forwarded.push("--prompt".to_string());
+        forwarded.push(prompt);
+    }
+
+    Ok(forwarded)
 }
 
 fn resolve_runtime_for_dispatch(
@@ -2652,6 +2671,27 @@ mod tests {
     }
 
     #[test]
+    fn parses_top_level_continue_for_interactive_resume() {
+        let cli = parse_ok(&["codewhale", "--continue"]);
+
+        assert!(cli.continue_session);
+        assert!(cli.prompt_flag.is_none());
+        assert!(cli.prompt.is_empty());
+        assert_eq!(root_tui_passthrough(&cli).unwrap(), vec!["--continue"]);
+    }
+
+    #[test]
+    fn top_level_continue_rejects_one_shot_prompt() {
+        let cli = parse_ok(&["codewhale", "--continue", "-p", "follow up"]);
+
+        let err = root_tui_passthrough(&cli).expect_err("prompted continue should be rejected");
+        assert!(
+            err.to_string()
+                .contains("codewhale exec --continue <PROMPT>")
+        );
+    }
+
+    #[test]
     fn parses_split_top_level_prompt_words_for_windows_cmd_shims() {
         let cli = parse_ok(&["deepseek", "hello", "world"]);
 
@@ -2711,6 +2751,7 @@ mod tests {
             "--mouse-capture",
             "--no-mouse-capture",
             "--skip-onboarding",
+            "--continue",
             "--prompt",
         ] {
             assert!(

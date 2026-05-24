@@ -1069,7 +1069,9 @@ mod tests {
             "A very long title that should be truncated by the list pane width",
         )];
         let width = 24;
-        let lines = build_list_lines(&sessions, 0, width, 0, 5, false, "", "recent", false, false, "", None);
+        let lines = build_list_lines(
+            &sessions, 0, width, 0, 5, false, "", "recent", false, false, "", None,
+        );
 
         for line in lines {
             let rendered_width: usize = line.spans.iter().map(|span| span.content.width()).sum();
@@ -1086,7 +1088,9 @@ mod tests {
             test_session(1, "first session"),
             test_session(2, "second session"),
         ];
-        let lines = build_list_lines(&sessions, 1, 80, 0, 5, false, "", "recent", false, false, "", None);
+        let lines = build_list_lines(
+            &sessions, 1, 80, 0, 5, false, "", "recent", false, false, "", None,
+        );
 
         let selected_line = lines
             .iter()
@@ -1111,7 +1115,20 @@ mod tests {
         let mut forked = test_session(1, "forked path");
         forked.parent_session_id = Some("parent-session-abcdef".to_string());
         forked.forked_from_message_count = Some(3);
-        let lines = build_list_lines(&[forked], 0, 120, 0, 5, false, "", "recent", false, false, "", None);
+        let lines = build_list_lines(
+            &[forked],
+            0,
+            120,
+            0,
+            5,
+            false,
+            "",
+            "recent",
+            false,
+            false,
+            "",
+            None,
+        );
 
         let rendered = lines
             .iter()
@@ -1128,7 +1145,9 @@ mod tests {
             test_session(1, "first session"),
             test_session(2, "second session"),
         ];
-        let lines = build_list_lines(&sessions, 0, 80, 0, 5, false, "", "recent", false, false, "", None);
+        let lines = build_list_lines(
+            &sessions, 0, 80, 0, 5, false, "", "recent", false, false, "", None,
+        );
 
         let rendered = lines
             .iter()
