@@ -1410,7 +1410,7 @@ fn english(id: MessageId) -> &'static str {
         MessageId::KbSendDraft => "Send the current draft",
         MessageId::KbCloseMenu => "Close menu, cancel request, discard draft, or clear input",
         MessageId::KbCancelOrExit => "Cancel request, or exit when idle",
-        MessageId::KbShellControls => "Open shell controls for a running foreground command",
+        MessageId::KbShellControls => "Background the running foreground shell command",
         MessageId::KbExitEmpty => "Exit when input is empty",
         MessageId::KbCommandPalette => "Open the command palette",
         MessageId::KbFuzzyFilePicker => "Open the fuzzy file picker (insert @path on Enter)",
@@ -1962,7 +1962,7 @@ fn vietnamese(id: MessageId) -> Option<&'static str> {
         MessageId::KbSendDraft => "Gửi bản nháp hiện tại",
         MessageId::KbCloseMenu => "Đóng menu, hủy yêu cầu, hủy bản nháp hoặc xóa sạch đầu vào",
         MessageId::KbCancelOrExit => "Hủy yêu cầu, hoặc thoát khi rảnh",
-        MessageId::KbShellControls => "Mở các điều khiển shell cho một lệnh đang chạy ở tiền cảnh",
+        MessageId::KbShellControls => "Chuyển lệnh shell đang chạy ở tiền cảnh xuống nền",
         MessageId::KbExitEmpty => "Thoát khi khung nhập trống",
         MessageId::KbCommandPalette => "Mở bảng lệnh (command palette)",
         MessageId::KbFuzzyFilePicker => {
@@ -2619,7 +2619,7 @@ fn japanese(id: MessageId) -> Option<&'static str> {
             "メニューを閉じる、リクエストをキャンセル、下書きを破棄、または入力をクリア"
         }
         MessageId::KbCancelOrExit => "リクエストをキャンセル、またはアイドル時に終了",
-        MessageId::KbShellControls => "実行中のフォアグラウンドコマンドのシェル制御を開く",
+        MessageId::KbShellControls => "実行中のフォアグラウンドコマンドをバックグラウンドへ移す",
         MessageId::KbExitEmpty => "入力が空の時に終了",
         MessageId::KbCommandPalette => "コマンドパレットを開く",
         MessageId::KbFuzzyFilePicker => "ファジーファイルピッカーを開く（Enter で @path を挿入）",
@@ -3109,7 +3109,7 @@ fn chinese_simplified(id: MessageId) -> Option<&'static str> {
         MessageId::KbSendDraft => "发送当前草稿",
         MessageId::KbCloseMenu => "关闭菜单、取消请求、丢弃草稿或清空输入",
         MessageId::KbCancelOrExit => "取消请求，或空闲时退出",
-        MessageId::KbShellControls => "打开正在运行的前台命令的 shell 控制",
+        MessageId::KbShellControls => "将正在运行的前台命令转入后台",
         MessageId::KbExitEmpty => "输入框为空时退出",
         MessageId::KbCommandPalette => "打开命令面板",
         MessageId::KbFuzzyFilePicker => "打开模糊文件选择器（按 Enter 插入 @path）",
@@ -3615,7 +3615,7 @@ fn portuguese_brazil(id: MessageId) -> Option<&'static str> {
             "Fechar menu, cancelar requisição, descartar rascunho ou limpar entrada"
         }
         MessageId::KbCancelOrExit => "Cancelar requisição ou sair quando ocioso",
-        MessageId::KbShellControls => "Abrir controles de shell para comando em primeiro plano",
+        MessageId::KbShellControls => "Enviar o comando em primeiro plano para segundo plano",
         MessageId::KbExitEmpty => "Sair quando entrada vazia",
         MessageId::KbCommandPalette => "Abrir paleta de comandos",
         MessageId::KbFuzzyFilePicker => {
@@ -4177,7 +4177,7 @@ fn spanish_latin_america(id: MessageId) -> Option<&'static str> {
             "Cerrar menú, cancelar solicitud, descartar borrador o limpiar entrada"
         }
         MessageId::KbCancelOrExit => "Cancelar solicitud o salir cuando está inactivo",
-        MessageId::KbShellControls => "Abrir controles de shell para comando en primer plano",
+        MessageId::KbShellControls => "Enviar el comando en primer plano a segundo plano",
         MessageId::KbExitEmpty => "Salir cuando la entrada está vacía",
         MessageId::KbCommandPalette => "Abrir paleta de comandos",
         MessageId::KbFuzzyFilePicker => {
