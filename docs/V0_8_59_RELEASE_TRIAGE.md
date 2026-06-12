@@ -248,6 +248,48 @@ Close after the release branch reaches `main`.
 - #2773 - complete provider fallback chain
 - #2239 - i18n Phase 1-4b wiring plus rebase compile fixes
 
+## Full Open-PR Equivalence Audit (2026-06-12, vs release head d7de0a88)
+
+Method: `git merge-tree --write-tree` of every open PR head against the
+release branch. "Already landed" means the merge result tree is identical to
+the release branch tree. Manual scratch-merge verdicts override raw
+merge-tree conflicts where noted.
+
+### Landed on the release branch in this pass
+
+- #2943 - macOS SUPER→CONTROL normalization. Merged as `4d84d66e`, tests green.
+- #2971 - matched approval rule metadata. Merged as `d7de0a88`, tests green.
+
+### Already landed (identical tree; close after release reaches main)
+
+#2895, #2901, #3001, #3002, #3003, #3006, #3008, #3062, #3119, #3135
+(#3119/#3135 are duplicates of each other), plus manually verified
+zero-residual: #3152, #3148, #3150, #3056, #3052, #3011, #3009.
+
+### Clean merge with real delta (candidates; need review, not in v0.8.59 label mostly)
+
+- Security: #3140 command-injection fix in hooks (3 files) — high priority review.
+- Infra: #2903 musl static linux build (3 files; was BLOCKED on main, clean here).
+- Docs: #2986 harvest-credit close template.
+- Dependency bumps (workflow/web/rust): #2991, #2992, #2993, #2994, #2995,
+  #2996, #2997, #2998, #2999, #3000.
+- Generated test PRs: #3113, #3116, #3120, #3122, #3125, #3130, #3131, #3132,
+  #3134, #3137.
+- Generated perf/cleanup PRs: #3105, #3107, #3108, #3109, #3112, #3117,
+  #3121, #3129.
+
+### Conflict against release branch (need scratch triage, rebase, or defer)
+
+Real feature/fix work: #3103 (#3080), #3104 (#3095), #3106 (#3095), #3013,
+#3010, #3053, #2773 (#2574), #2808, #2851, #2865, #2933, #2486, #2879,
+#3051 (voice, see above), #3005 (registry refactor, see above).
+
+i18n localize train (likely serial-conflicting with each other): #2239,
+#2894, #2899, #2918, #2919, #2921, #2926, #2929, #2932, #2940.
+
+Generated test/cleanup PRs with conflicts: #3110, #3111, #3114, #3115,
+#3118, #3123, #3124, #3126, #3127, #3128, #3133, #3136, #3138, #3139, #3141.
+
 ## Milestone Issues
 
 At scan time, milestone `v0.8.59` had 76 open issues and 35 open PRs, for 111
