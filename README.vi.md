@@ -180,9 +180,9 @@ nó và chỉ dùng các công cụ.
 CodeWhale tồn tại nhờ những người dùng nó, làm hỏng nó, và sửa nó.
 
 - **[DeepSeek](https://github.com/deepseek-ai)** — những mô hình và sự hỗ trợ đã
-  giúp dự án này khởi đầu. 感谢 DeepSeek 提供模型与支持。
+  giúp dự án này khởi đầu.（感谢 DeepSeek 提供模型与支持。）
 - **[DataWhale](https://github.com/datawhalechina)** 🐋 — vì sự hỗ trợ và vì đã
-  đón chúng tôi vào gia đình Whale Brother. 感谢 DataWhale 的支持。
+  đón chúng tôi vào gia đình Whale Brother.（感谢 DataWhale 的支持。）
 - **[OpenWarp](https://github.com/zerx-lab/warp)** và
   **[Open Design](https://github.com/nexu-io/open-design)** — vì đã hợp tác xây
   dựng một trải nghiệm terminal-agent tốt hơn.

@@ -242,7 +242,8 @@ export default async function HomePage({ params }: { params: Promise<{ locale: s
       <StatGrid stats={stats} />
  
       {/* SEE HOW IT DECIDES — real reasoning traces prove the constitution operates */}
-      <section className="mx-auto max-w-[1400px] px-6 py-16">
+      <section className="bg-paper-deep hairline-t hairline-b">
+        <div className="mx-auto max-w-[1400px] px-6 py-20">
         <div className="flex items-baseline gap-4 mb-3 hairline-b pb-4">
           <Seal char="判" />
           <h2 className="font-display">
@@ -260,10 +261,11 @@ export default async function HomePage({ params }: { params: Promise<{ locale: s
             ? "这些是真实推理的忠实摘录，非杜撰。宪法不是墙上的口号，而是模型决策时真正遵循的顺序。"
             : "Faithful excerpts from real reasoning — not invented. The constitution isn't a poster on the wall; it's the order the model actually follows when it decides."}
         </div>
+        </div>
       </section>
 
       {/* WHAT IT IS — the core ideas behind the harness */}
-      <section className="mx-auto max-w-[1400px] px-6 py-16">
+      <section className="mx-auto max-w-[1400px] px-6 py-12">
         <div className="flex items-baseline gap-4 mb-2 hairline-b pb-4">
           <Seal char="是" />
           <h2 className="font-display">
@@ -286,7 +288,7 @@ export default async function HomePage({ params }: { params: Promise<{ locale: s
                   Agent 不是模型卡片，也不是排行榜数字。它是这个终端、这个工作区、这个会话里的实例。先有地址，责任才有落点。
                 </p>
               </div>
-              <div className="p-6">
+              <div className="p-6 bg-paper-deep">
                 <div className="eyebrow mb-3">02 · 嵌套宪法</div>
                 <h3 className="font-display text-xl mb-3">冲突时有法律</h3>
                 <p className="text-sm text-ink-soft leading-[1.9]">
@@ -310,7 +312,7 @@ export default async function HomePage({ params }: { params: Promise<{ locale: s
                   The agent is not a model card or leaderboard score. It is an instance in this terminal, this workspace, this session. Give it an address before you ask it to act.
                 </p>
               </div>
-              <div className="p-6">
+              <div className="p-6 bg-paper-deep">
                 <div className="eyebrow mb-3">02 · nested constitution</div>
                 <h3 className="font-display text-xl mb-3">Conflict has law</h3>
                 <p className="text-sm text-ink-soft leading-relaxed">
@@ -342,7 +344,7 @@ export default async function HomePage({ params }: { params: Promise<{ locale: s
 
       {/* MAINTAINER LOOP */}
       <section className="bg-paper-deep hairline-t hairline-b">
-        <div className="mx-auto max-w-[1400px] px-6 py-16">
+        <div className="mx-auto max-w-[1400px] px-6 py-14">
           <div className="grid lg:grid-cols-12 gap-10 items-start">
             <div className="lg:col-span-5">
               <div className="flex items-baseline gap-4 mb-4">
@@ -398,7 +400,7 @@ export default async function HomePage({ params }: { params: Promise<{ locale: s
                     ]
                 ).map((item) => (
                   <div key={item.n} className="p-5">
-                    <div className="font-mono text-[0.7rem] text-indigo uppercase tracking-widest mb-2">{item.n}</div>
+                    <div className={`font-mono uppercase tracking-widest mb-2 ${item.n === "01" ? "text-[0.6rem] text-indigo/60" : item.n === "04" ? "text-[0.82rem] text-indigo font-semibold" : "text-[0.7rem] text-indigo"}`}>{item.n}</div>
                     <h3 className="font-display text-lg mb-2">{item.t}</h3>
                     <p className={`text-sm text-ink-soft ${isZh ? "leading-[1.9] tracking-wide" : "leading-relaxed"}`}>
                       {item.d}
@@ -412,7 +414,7 @@ export default async function HomePage({ params }: { params: Promise<{ locale: s
       </section>
 
       {/* HOW IT WORKS */}
-      <section className="mx-auto max-w-[1400px] px-6 py-16">
+      <section className="mx-auto max-w-[1400px] px-6 py-12">
         <div className="flex items-baseline gap-4 mb-8 hairline-b pb-4">
           <Seal char="作" />
           <h2 className="font-display">
@@ -504,7 +506,7 @@ export default async function HomePage({ params }: { params: Promise<{ locale: s
         <div className="flex items-baseline gap-4 mb-5 hairline-b pb-4">
           <Seal char="谢" />
           <div>
-            <div className="eyebrow mb-2">{isZh ? "v0.8.56 致谢" : "v0.8.56 credits"}</div>
+            <div className="eyebrow mb-2">{isZh ? `v${facts.version} 致谢` : `v${facts.version} credits`}</div>
             <h2 className="font-display text-3xl">
               {isZh ? "每个补丁和报告都算数" : "Every patch and report counts"}
             </h2>
@@ -556,7 +558,7 @@ export default async function HomePage({ params }: { params: Promise<{ locale: s
 
       {/* JOIN IN */}
       <section className="bg-ink text-paper">
-        <div className="mx-auto max-w-[1400px] px-6 py-16 grid lg:grid-cols-12 gap-10 items-center">
+        <div className="mx-auto max-w-[1400px] px-6 py-20 grid lg:grid-cols-12 gap-10 items-center">
           <div className="lg:col-span-8">
             <div className="eyebrow text-paper-deep/70 mb-3">{isZh ? "加入" : "Join in"}</div>
             <h2 className="font-display text-paper text-4xl leading-tight">

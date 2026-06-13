@@ -189,12 +189,6 @@ CodeWhale exists because of the people who use it, break it, and fix it.
 - **Every contributor** — the full per-PR record lives in
   [docs/CONTRIBUTORS.md](docs/CONTRIBUTORS.md). Thank you.
 
-## Contributing
-
-See [CONTRIBUTING.md](CONTRIBUTING.md). Pull requests welcome — check the
-[open issues](https://github.com/Hmbown/CodeWhale/issues) for good first
-contributions.
-
 ## License
 
 [MIT](LICENSE)
