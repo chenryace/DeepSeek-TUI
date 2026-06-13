@@ -1521,7 +1521,7 @@ impl ModalView for ConfigView {
             let mut lines: Vec<Line> = vec![
                 Line::from(vec![Span::styled(
                     self.tr(MessageId::ConfigTitle),
-                    Style::default().fg(palette::DEEPSEEK_BLUE).bold(),
+                    Style::default().fg(palette::WHALE_ACCENT_PRIMARY).bold(),
                 )]),
                 Line::from(vec![
                     Span::styled("  Search: ", Style::default().fg(palette::TEXT_MUTED)),
@@ -1649,7 +1649,7 @@ impl ModalView for ConfigView {
         let block = Block::default()
             .title(Line::from(vec![Span::styled(
                 self.tr(MessageId::ConfigModalTitle),
-                Style::default().fg(palette::DEEPSEEK_BLUE).bold(),
+                Style::default().fg(palette::WHALE_ACCENT_PRIMARY).bold(),
             )]))
             .title_bottom(Line::from(Span::styled(
                 footer,
@@ -1983,7 +1983,7 @@ impl ModalView for SubAgentsView {
                 Block::default()
                     .title(Line::from(vec![Span::styled(
                         " Sub-agents ",
-                        Style::default().fg(palette::DEEPSEEK_BLUE).bold(),
+                        Style::default().fg(palette::WHALE_ACCENT_PRIMARY).bold(),
                     )]))
                     .title_bottom(Line::from(vec![
                         Span::styled(" Esc to close ", Style::default().fg(palette::TEXT_MUTED)),
@@ -2139,7 +2139,7 @@ fn format_agent_status(
         SubAgentStatus::Running => ("running", Style::default().fg(palette::DEEPSEEK_SKY), None),
         SubAgentStatus::Completed => (
             "completed",
-            Style::default().fg(palette::DEEPSEEK_BLUE),
+            Style::default().fg(palette::WHALE_ACCENT_PRIMARY),
             None,
         ),
         SubAgentStatus::Interrupted(reason) => (
@@ -2852,7 +2852,7 @@ base_url = "https://api.xiaomimimo.com/v1"
         );
         assert!(
             !(area.x..area.x.saturating_add(area.width))
-                .any(|x| buf[(x, y)].bg == palette::DEEPSEEK_BLUE),
+                .any(|x| buf[(x, y)].bg == palette::WHALE_ACCENT_PRIMARY),
             "selected config row should not use the bright accent background"
         );
     }

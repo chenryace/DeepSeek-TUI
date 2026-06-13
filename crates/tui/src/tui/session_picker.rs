@@ -27,7 +27,7 @@ fn modal_block(title: &str) -> Block<'static> {
         .title(Line::from(vec![Span::styled(
             title.to_string(),
             Style::default()
-                .fg(palette::DEEPSEEK_BLUE)
+                .fg(palette::WHALE_ACCENT_PRIMARY)
                 .add_modifier(Modifier::BOLD),
         )]))
         .borders(Borders::ALL)
@@ -1110,7 +1110,7 @@ mod tests {
 
         assert_eq!(span.style.fg, Some(palette::SELECTION_TEXT));
         assert_eq!(span.style.bg, Some(palette::SELECTION_BG));
-        assert_ne!(span.style.bg, Some(palette::DEEPSEEK_BLUE));
+        assert_ne!(span.style.bg, Some(palette::WHALE_ACCENT_PRIMARY));
         assert!(span.style.add_modifier.contains(Modifier::BOLD));
     }
 
