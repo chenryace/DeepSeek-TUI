@@ -1782,9 +1782,11 @@ fn live_subagent_result(
         model: String::new(),
         nickname,
         status,
+        worker_status: None,
         result: None,
         steps_taken: 0,
         checkpoint: None,
+        needs_input: None,
         duration_ms: 0,
         from_prior_session: false,
     }
@@ -2303,9 +2305,11 @@ mod tests {
             model: "deepseek-v4-flash".to_string(),
             nickname: None,
             status,
+            worker_status: None,
             result: None,
             steps_taken: 1,
             checkpoint: None,
+            needs_input: None,
             duration_ms: 10,
             from_prior_session: false,
         }

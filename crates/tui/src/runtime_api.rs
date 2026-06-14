@@ -4203,10 +4203,12 @@ mod tests {
     #[tokio::test]
     async fn agent_runs_runtime_api_exposes_persisted_worker_receipts() -> Result<()> {
         use crate::tools::subagent::{
-            AgentRunArtifactRef, AgentRunFollowUpTarget, AgentRunTakeoverTarget, AgentRunUsage,
-            AgentRunVerificationSummary, AgentWorkerEvent, AgentWorkerRecord, AgentWorkerSpec,
-            AgentWorkerStatus, AgentWorkerToolProfile, SubAgentType,
+            AgentRunArtifactRef, AgentRunFollowUpTarget, AgentRunRecommendedAction,
+            AgentRunTakeoverTarget, AgentRunUsage, AgentRunVerificationSummary, AgentWorkerEvent,
+            AgentWorkerRecord, AgentWorkerSpec, AgentWorkerStatus, AgentWorkerToolProfile,
+            SubAgentType,
         };
+        use crate::worker_profile::{ModelRoute, ToolScope, WorkerRuntimeProfile};
         use std::collections::VecDeque;
 
         let root =
@@ -4229,6 +4231,14 @@ mod tests {
                 context_mode: "fresh".to_string(),
                 fork_context: false,
                 tool_profile: AgentWorkerToolProfile::Explicit(vec!["read_file".to_string()]),
+                runtime_profile: {
+                    let mut profile = WorkerRuntimeProfile::for_role(SubAgentType::Verifier);
+                    profile.tools = ToolScope::Explicit(vec!["read_file".to_string()]);
+                    profile.model = ModelRoute::Fixed("deepseek-v4-flash".to_string());
+                    profile.max_spawn_depth =
+                        crate::tools::subagent::DEFAULT_MAX_SPAWN_DEPTH.saturating_sub(1);
+                    profile
+                },
                 max_steps: 4,
                 spawn_depth: 1,
                 max_spawn_depth: crate::tools::subagent::DEFAULT_MAX_SPAWN_DEPTH,
@@ -4267,6 +4277,11 @@ mod tests {
             verification: AgentRunVerificationSummary {
                 status: "self_report_only".to_string(),
                 summary: "no verified receipt attached".to_string(),
+            },
+            recommended_action: AgentRunRecommendedAction {
+                action: "verify_self_report".to_string(),
+                tool: Some("handle_read".to_string()),
+                reason: "Worker agent_receipt completed; verify its self-report.".to_string(),
             },
             status: AgentWorkerStatus::Completed,
             created_at_ms: 1,

@@ -8,21 +8,21 @@
 //! route, recursion budget, foreground/background). A child profile is always
 //! **derived** from its parent and can never escalate beyond it.
 //!
-//! Scope: this module is the **foundation only**. It defines the contract and
-//! the parent→child derivation with tests. Wiring `agent_open` and the Fleet
-//! worker launch to *build and enforce* these profiles — and mapping the legacy
-//! `AgentWorkerToolProfile` / per-worker shell boolean onto `ShellPolicy` /
-//! `ToolScope` — is a follow-up pass (#3217). Nothing here changes existing
-//! behavior yet.
+//! Scope: this module defines the contract and the parent→child derivation with
+//! tests. `agent_open` and Fleet worker records now build and persist these
+//! profiles so parent-visible worker projections have a single capability
+//! contract. Runtime enforcement of every declared field remains incremental
+//! follow-up work (#3217).
 
 #![allow(dead_code)] // foundation: consumers are wired in a follow-up (#3217).
 
 use crate::tools::subagent::SubAgentType;
+use serde::{Deserialize, Serialize};
 
 /// Coarse capability classes a worker may exercise, beyond read access (reads
 /// are always permitted). A child may only ever hold a *subset* of its parent's
 /// capabilities.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PermissionSet {
     /// May modify the workspace (`write_file` / `edit_file` / `apply_patch`).
     pub write: bool,
@@ -62,7 +62,8 @@ impl PermissionSet {
 /// Shell access policy — the replacement for the legacy per-worker shell boolean
 /// (#3217). Ordered from most to least restrictive so `min` yields the safer of
 /// two policies.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
 pub enum ShellPolicy {
     /// No shell access.
     None,
@@ -84,7 +85,8 @@ impl ShellPolicy {
 
 /// Which tools a worker may call. Mirrors the existing `AgentWorkerToolProfile`
 /// (`Inherited` / `Explicit`) so the two can be reconciled when this is wired in.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
 pub enum ToolScope {
     /// Inherit the parent's tool surface.
     Inherit,
@@ -96,7 +98,8 @@ pub enum ToolScope {
 /// WhaleFlow distinct from a single-model sub-agent fan-out (#3217, #2027,
 /// #1768). A scout/tool role can ride a cheap flash route while a synthesis role
 /// inherits the (typically larger) session model.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
 pub enum ModelRoute {
     /// Same model as the parent / session.
     Inherit,
@@ -107,7 +110,7 @@ pub enum ModelRoute {
 }
 
 /// The capability contract a single worker runs under.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct WorkerRuntimeProfile {
     pub role: SubAgentType,
     pub permissions: PermissionSet,
@@ -217,6 +220,12 @@ impl WorkerRuntimeProfile {
     #[must_use]
     pub fn can_spawn_child(&self) -> bool {
         self.max_spawn_depth > 0
+    }
+}
+
+impl Default for WorkerRuntimeProfile {
+    fn default() -> Self {
+        Self::for_role(SubAgentType::General)
     }
 }
 

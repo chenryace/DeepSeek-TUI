@@ -1,4 +1,5 @@
 use super::*;
+use crate::worker_profile::ShellPolicy;
 use axum::{Json, Router, routing::post};
 use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -21,15 +22,24 @@ fn make_snapshot(status: SubAgentStatus) -> SubAgentResult {
         model: "deepseek-v4-flash".to_string(),
         nickname: None,
         status,
+        worker_status: None,
         result: None,
         steps_taken: 0,
         checkpoint: None,
+        needs_input: None,
         duration_ms: 0,
         from_prior_session: false,
     }
 }
 
 fn make_worker_spec(worker_id: &str, workspace: PathBuf) -> AgentWorkerSpec {
+    let tool_profile =
+        AgentWorkerToolProfile::Explicit(vec!["read_file".to_string(), "grep_files".to_string()]);
+    let mut runtime_profile = WorkerRuntimeProfile::for_role(SubAgentType::Explore);
+    runtime_profile.tools =
+        ToolScope::Explicit(vec!["read_file".to_string(), "grep_files".to_string()]);
+    runtime_profile.model = ModelRoute::Fixed("deepseek-v4-flash".to_string());
+    runtime_profile.max_spawn_depth = DEFAULT_MAX_SPAWN_DEPTH.saturating_sub(1);
     AgentWorkerSpec {
         worker_id: worker_id.to_string(),
         run_id: worker_id.to_string(),
@@ -43,10 +53,8 @@ fn make_worker_spec(worker_id: &str, workspace: PathBuf) -> AgentWorkerSpec {
         git_branch: None,
         context_mode: "fresh".to_string(),
         fork_context: false,
-        tool_profile: AgentWorkerToolProfile::Explicit(vec![
-            "read_file".to_string(),
-            "grep_files".to_string(),
-        ]),
+        tool_profile,
+        runtime_profile,
         max_steps: 8,
         spawn_depth: 1,
         max_spawn_depth: DEFAULT_MAX_SPAWN_DEPTH,
@@ -96,10 +104,25 @@ fn headless_worker_record_tracks_lifecycle_without_tui_projection() {
         record.spec.tool_profile,
         AgentWorkerToolProfile::Explicit(vec!["read_file".to_string(), "grep_files".to_string()])
     );
+    assert_eq!(record.spec.runtime_profile.role, SubAgentType::Explore);
+    assert!(!record.spec.runtime_profile.permissions.write);
+    assert_eq!(
+        record.spec.runtime_profile.tools,
+        ToolScope::Explicit(vec!["read_file".to_string(), "grep_files".to_string()])
+    );
+    assert_eq!(
+        record.spec.runtime_profile.model,
+        ModelRoute::Fixed("deepseek-v4-flash".to_string())
+    );
     assert_eq!(record.result_summary.as_deref(), Some("worker summary"));
     assert_eq!(record.steps_taken, 1);
     assert_eq!(record.follow_up.tool, "agent_eval");
     assert_eq!(record.follow_up.agent_id.as_str(), "agent_worker_contract");
+    assert_eq!(record.recommended_action.action, "verify_self_report");
+    assert_eq!(
+        record.recommended_action.tool.as_deref(),
+        Some("handle_read")
+    );
     assert!(record.takeover.supported);
     assert!(
         record
@@ -125,6 +148,40 @@ fn headless_worker_record_tracks_lifecycle_without_tui_projection() {
             .events
             .iter()
             .any(|event| event.tool_name.as_deref() == Some("read_file"))
+    );
+}
+
+#[test]
+fn agent_open_worker_profile_derives_from_parent_without_escalation() {
+    let mut runtime = stub_runtime();
+    runtime.worker_profile = WorkerRuntimeProfile::for_role(SubAgentType::Explore);
+    runtime.spawn_depth = 1;
+    runtime.max_spawn_depth = DEFAULT_MAX_SPAWN_DEPTH;
+    let tool_profile =
+        AgentWorkerToolProfile::Explicit(vec!["read_file".to_string(), "write_file".to_string()]);
+
+    let profile = worker_profile_for_spawn(
+        &runtime,
+        &SubAgentType::Implementer,
+        &tool_profile,
+        "deepseek-v4-pro",
+        Some(ModelRoute::Fixed("deepseek-v4-pro".to_string())),
+    );
+
+    assert_eq!(profile.role, SubAgentType::Implementer);
+    assert!(
+        !profile.permissions.write,
+        "child cannot gain write permission from a read-only parent profile"
+    );
+    assert_eq!(profile.shell, ShellPolicy::ReadOnly);
+    assert_eq!(profile.max_spawn_depth, DEFAULT_MAX_SPAWN_DEPTH - 1);
+    assert_eq!(
+        profile.model,
+        ModelRoute::Fixed("deepseek-v4-pro".to_string())
+    );
+    assert_eq!(
+        profile.tools,
+        ToolScope::Explicit(vec!["read_file".to_string(), "write_file".to_string()])
     );
 }
 
@@ -748,7 +805,7 @@ async fn interrupted_projection_exposes_checkpoint_metadata_and_messages() {
     let ctx = ToolContext::new(".");
     let projection = subagent_session_projection(snapshot, false, &ctx, None).await;
 
-    assert_eq!(projection.status, "interrupted");
+    assert_eq!(projection.status, "waiting_for_user");
     assert!(projection.terminal);
     assert!(projection.continuable);
     assert_eq!(
@@ -1522,7 +1579,7 @@ async fn agent_eval_follow_up_defaults_to_nonblocking_projection() {
 }
 
 #[tokio::test]
-async fn api_timeout_preserves_checkpoint_and_agent_eval_continues_from_it() {
+async fn api_timeout_preserves_checkpoint_and_returns_needs_input_without_parking() {
     let tmp = tempdir().expect("tempdir");
     let manager = Arc::new(RwLock::new(SubAgentManager::new(
         tmp.path().to_path_buf(),
@@ -1542,9 +1599,13 @@ async fn api_timeout_preserves_checkpoint_and_agent_eval_continues_from_it() {
         tmp.path().to_path_buf(),
         "boot_test".to_string(),
     );
-    manager.write().await.agents.insert(agent_id.clone(), agent);
+    {
+        let mut manager = manager.write().await;
+        manager.agents.insert(agent_id.clone(), agent);
+        manager.register_worker(make_worker_spec(&agent_id, tmp.path().to_path_buf()));
+    }
 
-    let (client, calls, bodies) =
+    let (client, calls, _bodies) =
         delayed_chat_client(Duration::from_millis(80), "resumed answer").await;
     let mut runtime = stub_runtime().with_step_api_timeout(Duration::from_millis(50));
     runtime.client = client;
@@ -1570,38 +1631,7 @@ async fn api_timeout_preserves_checkpoint_and_agent_eval_continues_from_it() {
     };
     let task_handle = tokio::spawn(run_subagent_task(task));
 
-    let interrupted = tokio::time::timeout(Duration::from_secs(2), async {
-        loop {
-            let snapshot = {
-                let manager = manager.read().await;
-                manager
-                    .get_result(&agent_id)
-                    .expect("agent should stay registered")
-            };
-            if matches!(snapshot.status, SubAgentStatus::Interrupted(_)) {
-                return snapshot;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("agent should become interrupted after API timeout");
-
-    let checkpoint = interrupted
-        .checkpoint
-        .as_ref()
-        .expect("timeout should preserve checkpoint");
-    assert!(checkpoint.continuable);
-    assert_eq!(checkpoint.steps_taken, 1);
-    assert!(
-        checkpoint
-            .messages
-            .iter()
-            .any(|message| message_text(message).contains("Inspect checkpoint behavior")),
-        "checkpoint should preserve local child prompt: {checkpoint:?}"
-    );
-
-    tokio::time::timeout(Duration::from_secs(2), async {
+    tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             if calls.load(Ordering::SeqCst) >= 1 {
                 break;
@@ -1612,7 +1642,7 @@ async fn api_timeout_preserves_checkpoint_and_agent_eval_continues_from_it() {
     .await
     .expect("first timed-out API attempt should reach the test server");
 
-    let interrupted_envelope = tokio::time::timeout(Duration::from_secs(2), async {
+    let interrupted_envelope = tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             for env in mailbox_rx.drain() {
                 if let MailboxMessage::Interrupted {
@@ -1635,6 +1665,38 @@ async fn api_timeout_preserves_checkpoint_and_agent_eval_continues_from_it() {
         interrupted_envelope.1
     );
 
+    tokio::time::timeout(Duration::from_secs(5), task_handle)
+        .await
+        .expect("sub-agent task must not park waiting for checkpoint input")
+        .expect("sub-agent task should finish");
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        1,
+        "needs-input interruption must not park for continuation or issue a second API request"
+    );
+
+    let interrupted = {
+        let manager = manager.read().await;
+        manager
+            .get_result(&agent_id)
+            .expect("agent should stay registered")
+    };
+    assert!(matches!(interrupted.status, SubAgentStatus::Interrupted(_)));
+    let checkpoint = interrupted
+        .checkpoint
+        .as_ref()
+        .expect("timeout should preserve checkpoint");
+    assert!(checkpoint.continuable);
+    assert_eq!(checkpoint.steps_taken, 1);
+    assert!(
+        checkpoint
+            .messages
+            .iter()
+            .any(|message| message_text(message).contains("Inspect checkpoint behavior")),
+        "checkpoint should preserve local child prompt: {checkpoint:?}"
+    );
+    assert!(interrupted.needs_input.is_some());
+
     let ctx = runtime.context.clone();
     let tool = AgentEvalTool::new(Arc::clone(&manager));
     let result = tool
@@ -1643,9 +1705,36 @@ async fn api_timeout_preserves_checkpoint_and_agent_eval_continues_from_it() {
         .expect("agent_eval should project interrupted checkpoint");
     let projection: SubAgentSessionProjection =
         serde_json::from_str(&result.content).expect("projection deserializes");
-    assert_eq!(projection.status, "interrupted");
+    assert_eq!(projection.status, "waiting_for_user");
     assert!(projection.continuable);
     assert!(projection.checkpoint.is_some());
+    assert!(
+        projection
+            .needs_input
+            .as_ref()
+            .expect("needs_input should be projected")
+            .question
+            .contains("Re-dispatch this worker"),
+        "projection should tell the parent how to wake/re-dispatch: {:?}",
+        projection.needs_input
+    );
+    assert_eq!(
+        projection
+            .worker_record
+            .as_ref()
+            .expect("worker record")
+            .status,
+        AgentWorkerStatus::WaitingForUser
+    );
+    assert_eq!(
+        projection
+            .worker_record
+            .as_ref()
+            .expect("worker record")
+            .recommended_action
+            .action,
+        "provide_follow_up_or_redispatch"
+    );
 
     let result = tool
         .execute(
@@ -1658,43 +1747,29 @@ async fn api_timeout_preserves_checkpoint_and_agent_eval_continues_from_it() {
             &ctx,
         )
         .await
-        .expect("agent_eval should continue checkpointed interrupted session");
+        .expect("agent_eval should return projection when checkpoint steering cannot attach");
     let meta = result.metadata.expect("metadata present");
     assert_eq!(
         meta["message_delivery"]["continued_from_checkpoint"],
-        json!(true)
+        json!(false)
+    );
+    assert_eq!(meta["message_delivery"]["delivered"], json!(false));
+    assert!(
+        meta["message_delivery"]["reason"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("no live child task"),
+        "undelivered reason should make the detached checkpoint explicit: {meta}"
     );
     let projection: SubAgentSessionProjection =
         serde_json::from_str(&result.content).expect("projection deserializes");
-    assert_eq!(projection.status, "completed");
+    assert_eq!(projection.status, "waiting_for_user");
+    assert!(projection.needs_input.is_some());
     assert_eq!(
-        projection.snapshot.result.as_deref(),
-        Some("resumed answer")
+        calls.load(Ordering::SeqCst),
+        1,
+        "agent_eval steering is best-effort and must not respawn the child implicitly"
     );
-    assert!(
-        projection
-            .checkpoint
-            .as_ref()
-            .expect("completed projection keeps latest checkpoint")
-            .messages
-            .iter()
-            .any(|message| message_text(message)
-                .contains("Please continue with the prior checkpoint.")),
-        "continuation instruction should be part of resumed transcript"
-    );
-
-    task_handle.await.expect("sub-agent task should finish");
-    assert!(
-        calls.load(Ordering::SeqCst) >= 2,
-        "continuation should make a second API request"
-    );
-    let bodies = bodies
-        .lock()
-        .expect("request body recorder mutex poisoned")
-        .clone();
-    let second_request = serde_json::to_string(&bodies[1]).expect("second request body serializes");
-    assert!(second_request.contains("Inspect checkpoint behavior"));
-    assert!(second_request.contains("Please continue with the prior checkpoint."));
 }
 
 #[tokio::test]
@@ -2990,6 +3065,7 @@ fn stub_runtime() -> SubAgentRuntime {
         role_models: std::collections::HashMap::new(),
         context,
         allow_shell: true,
+        worker_profile: WorkerRuntimeProfile::for_role(SubAgentType::General),
         event_tx: None,
         manager: new_shared_subagent_manager(workspace, 5),
         spawn_depth: 0,

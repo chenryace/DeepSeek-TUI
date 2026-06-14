@@ -21,7 +21,7 @@ use ratatui::{
 use crate::deepseek_theme::Theme;
 use crate::palette;
 use crate::tools::plan::StepStatus;
-use crate::tools::subagent::SubAgentStatus;
+use crate::tools::subagent::{AgentWorkerStatus, SubAgentStatus, agent_worker_status_name};
 use crate::tools::todo::TodoStatus;
 
 use super::app::{
@@ -2043,7 +2043,11 @@ fn sidebar_agent_rows(app: &App) -> Vec<SidebarAgentRow> {
                 id: agent.agent_id.clone(),
                 name: display_name,
                 role: agent.agent_type.as_str().to_string(),
-                status: subagent_status_text(&agent.status).to_string(),
+                status: agent
+                    .worker_status
+                    .map(sidebar_worker_status_text)
+                    .unwrap_or_else(|| subagent_status_text(&agent.status))
+                    .to_string(),
                 objective: Some(agent.assignment.objective.clone())
                     .filter(|objective| !objective.trim().is_empty()),
                 git_branch: agent.git_branch.clone(),
@@ -2074,7 +2078,7 @@ fn sidebar_agent_rows(app: &App) -> Vec<SidebarAgentRow> {
                     id: id.clone(),
                     name: display_name,
                     role: "agent".to_string(),
-                    status: "running".to_string(),
+                    status: sidebar_progress_status_text(progress).to_string(),
                     objective: None,
                     git_branch: None,
                     progress: Some(progress.clone()),
@@ -2096,6 +2100,41 @@ fn subagent_status_text(status: &SubAgentStatus) -> &'static str {
         SubAgentStatus::Interrupted(_) => "interrupted",
         SubAgentStatus::Failed(_) => "failed",
         SubAgentStatus::Cancelled => "canceled",
+    }
+}
+
+fn sidebar_worker_status_text(status: AgentWorkerStatus) -> &'static str {
+    match status {
+        AgentWorkerStatus::Queued => "queued",
+        AgentWorkerStatus::Starting => "starting",
+        AgentWorkerStatus::Running => "running",
+        AgentWorkerStatus::WaitingForUser => "waiting",
+        AgentWorkerStatus::ModelWait => "model wait",
+        AgentWorkerStatus::RunningTool => "tool",
+        AgentWorkerStatus::Completed => "done",
+        AgentWorkerStatus::Failed => "failed",
+        AgentWorkerStatus::Cancelled => "canceled",
+        AgentWorkerStatus::Interrupted => "interrupted",
+    }
+}
+
+fn sidebar_progress_status_text(progress: &str) -> &'static str {
+    let lower = progress.to_ascii_lowercase();
+    if lower.contains("queued") {
+        "queued"
+    } else if lower.contains("waiting for user") || lower.contains("waiting for follow-up") {
+        "waiting"
+    } else if lower.contains("waiting for model") || lower.contains("requesting model") {
+        "model wait"
+    } else if lower.contains("running tool")
+        || lower.contains("executing tool")
+        || lower.contains("tool:")
+    {
+        "tool"
+    } else if lower.contains("starting") {
+        "starting"
+    } else {
+        agent_worker_status_name(AgentWorkerStatus::Running)
     }
 }
 
@@ -2639,10 +2678,10 @@ mod tests {
         AutoSidebarState, SidebarAgentRow, SidebarHoverRow, SidebarHoverSection, SidebarHoverState,
         SidebarSubagentSummary, SidebarToolRow, SidebarWorkChecklistItem, SidebarWorkStrategyStep,
         SidebarWorkSummary, ToolRowOrder, auto_sidebar_panels, context_panel_cost_line,
-        editorial_tool_rows, normalize_activity_text, sidebar_hover_rows, sidebar_work_summary,
-        subagent_panel_hover_texts, subagent_panel_lines, subagent_panel_rows,
-        task_panel_hover_texts, task_panel_lines, task_panel_rows, work_panel_empty_hint,
-        work_panel_hover_texts, work_panel_lines,
+        editorial_tool_rows, normalize_activity_text, sidebar_agent_rows, sidebar_hover_rows,
+        sidebar_work_summary, subagent_panel_hover_texts, subagent_panel_lines,
+        subagent_panel_rows, task_panel_hover_texts, task_panel_lines, task_panel_rows,
+        work_panel_empty_hint, work_panel_hover_texts, work_panel_lines,
     };
     use crate::config::Config;
     use crate::palette;
@@ -4347,12 +4386,41 @@ mod tests {
             model: String::new(),
             nickname: nickname.map(str::to_string),
             status: crate::tools::subagent::SubAgentStatus::Running,
+            worker_status: None,
             result: None,
             steps_taken: 1,
             checkpoint: None,
+            needs_input: None,
             duration_ms: 100,
             from_prior_session: false,
         }
+    }
+
+    #[test]
+    fn sidebar_agent_rows_use_worker_status_from_cached_agents() {
+        let mut app = create_test_app();
+        let mut agent = cached_agent("agent_model_wait", Some("Blue"));
+        agent.worker_status = Some(crate::tools::subagent::AgentWorkerStatus::ModelWait);
+        app.subagent_cache.push(agent);
+
+        let rows = sidebar_agent_rows(&app);
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].status, "model wait");
+    }
+
+    #[test]
+    fn sidebar_progress_only_rows_parse_status_instead_of_hardcoding_running() {
+        let mut app = create_test_app();
+        app.agent_progress.insert(
+            "agent_queued".to_string(),
+            "queued for launch permit".to_string(),
+        );
+
+        let rows = sidebar_agent_rows(&app);
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].status, "queued");
     }
 
     #[test]

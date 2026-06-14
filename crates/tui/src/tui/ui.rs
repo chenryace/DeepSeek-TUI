@@ -1,9 +1,14 @@
 //! TUI event loop and rendering logic for `DeepSeek` CLI.
 
+use std::collections::{HashSet, VecDeque};
 use std::fmt::Write as _;
 use std::io::{self, Stdout, Write};
 use std::path::PathBuf;
-use std::sync::{Arc, LazyLock};
+use std::sync::{
+    Arc, LazyLock,
+    atomic::{AtomicBool, Ordering},
+};
+use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
@@ -252,6 +257,102 @@ const BEGIN_SYNC_UPDATE: &[u8] = b"\x1b[?2026h";
 /// End synchronized update (DEC 2026): tell the terminal to render
 /// the complete frame now.
 const END_SYNC_UPDATE: &[u8] = b"\x1b[?2026l";
+const TERMINAL_INPUT_POLL_INTERVAL: Duration = Duration::from_millis(50);
+const MAX_ENGINE_EVENTS_PER_DRAIN: usize = 512;
+
+struct TerminalInputPump {
+    rx: std::sync::mpsc::Receiver<io::Result<Event>>,
+    stop: Arc<AtomicBool>,
+    handle: Option<JoinHandle<()>>,
+}
+
+impl TerminalInputPump {
+    fn spawn() -> io::Result<Self> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let stop = Arc::new(AtomicBool::new(false));
+        let thread_stop = Arc::clone(&stop);
+        let handle = thread::Builder::new()
+            .name("codewhale-terminal-input".to_string())
+            .spawn(move || {
+                while !thread_stop.load(Ordering::Acquire) {
+                    match event::poll(TERMINAL_INPUT_POLL_INTERVAL) {
+                        Ok(true) => match event::read() {
+                            Ok(event) => {
+                                if tx.send(Ok(event)).is_err() {
+                                    break;
+                                }
+                            }
+                            Err(err) => {
+                                let _ = tx.send(Err(err));
+                                break;
+                            }
+                        },
+                        Ok(false) => {}
+                        Err(err) => {
+                            let _ = tx.send(Err(err));
+                            break;
+                        }
+                    }
+                }
+            })?;
+        Ok(Self {
+            rx,
+            stop,
+            handle: Some(handle),
+        })
+    }
+
+    fn recv_timeout(&self, timeout: Duration) -> io::Result<Option<Event>> {
+        match self.rx.recv_timeout(timeout) {
+            Ok(Ok(event)) => Ok(Some(event)),
+            Ok(Err(err)) => Err(err),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Ok(None),
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "terminal input pump disconnected",
+            )),
+        }
+    }
+
+    fn try_recv(&self) -> io::Result<Option<Event>> {
+        match self.rx.try_recv() {
+            Ok(Ok(event)) => Ok(Some(event)),
+            Ok(Err(err)) => Err(err),
+            Err(std::sync::mpsc::TryRecvError::Empty) => Ok(None),
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => Ok(None),
+        }
+    }
+}
+
+impl Drop for TerminalInputPump {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Release);
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+fn next_terminal_event(
+    input: &TerminalInputPump,
+    pending: &mut VecDeque<Event>,
+    timeout: Duration,
+) -> io::Result<Option<Event>> {
+    if let Some(event) = pending.pop_front() {
+        return Ok(Some(event));
+    }
+    input.recv_timeout(timeout)
+}
+
+fn try_next_terminal_event(
+    input: &TerminalInputPump,
+    pending: &mut VecDeque<Event>,
+) -> io::Result<Option<Event>> {
+    if let Some(event) = pending.pop_front() {
+        return Ok(Some(event));
+    }
+    input.try_recv()
+}
 
 /// Run the interactive TUI event loop.
 ///
@@ -1258,6 +1359,8 @@ async fn run_event_loop(
     let mut last_focus_recovery = Instant::now()
         .checked_sub(Duration::from_secs(60))
         .unwrap_or_else(Instant::now);
+    let terminal_input = TerminalInputPump::spawn()?;
+    let mut pending_terminal_events: VecDeque<Event> = VecDeque::new();
 
     // Fire-and-forget version check — runs once per session in the
     // background. On success, a short status toast advertises the update
@@ -1426,7 +1529,8 @@ async fn run_event_loop(
         let mut fallback_after_engine_error: Option<ApiProvider> = None;
         {
             let mut rx = engine_handle.rx_event.write().await;
-            loop {
+            let mut progress_redraw_agents: HashSet<String> = HashSet::new();
+            for _ in 0..MAX_ENGINE_EVENTS_PER_DRAIN {
                 let event = match rx.try_recv() {
                     Ok(event) => event,
                     Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
@@ -2355,8 +2459,10 @@ async fn run_event_loop(
                         // status-animation timer (80ms cadence) provides a guaranteed
                         // floor for sidebar updates.  Data is still recorded immediately;
                         // the sidebar picks it up on the next permitted redraw.
-                        if !agent_progress_redraw_permitted(
+                        if !agent_progress_redraw_permitted_for_drain(
                             &mut app.last_agent_progress_redraw,
+                            &mut progress_redraw_agents,
+                            &id,
                             Instant::now(),
                         ) {
                             // Restore the pre-event accumulator value: a
@@ -2850,14 +2956,14 @@ async fn run_event_loop(
         }
         poll_timeout = clamp_event_poll_timeout(poll_timeout);
 
-        // #549: this async task also performs a blocking terminal poll. Give
-        // the engine task a scheduler turn before we block again so an
-        // interactive submit can reach the API instead of appearing stuck on
-        // `working.` with no network activity.
+        // #549/#3216: give the engine task a scheduler turn before waiting on
+        // the terminal-input channel. Crossterm's blocking poll/read runs on
+        // `TerminalInputPump`, so engine floods cannot pin the OS input read.
         tokio::task::yield_now().await;
 
-        if event::poll(poll_timeout)? {
-            let evt = event::read()?;
+        if let Some(evt) =
+            next_terminal_event(&terminal_input, &mut pending_terminal_events, poll_timeout)?
+        {
             app.needs_redraw = true;
 
             // Handle bracketed paste events
@@ -2926,23 +3032,18 @@ async fn run_event_loop(
                 // buffer between intermediate sizes.
                 let mut final_w = width;
                 let mut final_h = height;
-                while event::poll(Duration::from_millis(0)).unwrap_or(false) {
-                    match event::read() {
-                        Ok(Event::Resize(w, h)) => {
+                while let Some(next_evt) =
+                    try_next_terminal_event(&terminal_input, &mut pending_terminal_events)?
+                {
+                    match next_evt {
+                        Event::Resize(w, h) => {
                             final_w = w;
                             final_h = h;
                         }
-                        Ok(other) => {
-                            // Non-resize event during the drain: we can't
-                            // un-read it. Drop it and let the user re-issue
-                            // — the resize-coalesce window is tiny.
-                            tracing::debug!(
-                                ?other,
-                                "non-resize event during resize coalesce; dropping"
-                            );
+                        other => {
+                            pending_terminal_events.push_back(other);
                             break;
                         }
-                        Err(_) => break,
                     }
                 }
 
@@ -4859,6 +4960,18 @@ fn agent_progress_redraw_permitted(last_redraw: &mut Option<Instant>, now: Insta
             true
         }
     }
+}
+
+fn agent_progress_redraw_permitted_for_drain(
+    last_redraw: &mut Option<Instant>,
+    seen_agents: &mut HashSet<String>,
+    agent_id: &str,
+    now: Instant,
+) -> bool {
+    if !seen_agents.insert(agent_id.to_string()) {
+        return false;
+    }
+    agent_progress_redraw_permitted(last_redraw, now)
 }
 
 fn recover_engine_event_disconnect(app: &mut App) -> bool {

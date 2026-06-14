@@ -39,6 +39,7 @@ use crate::tools::spec::{
 };
 use crate::tools::todo::{SharedTodoList, TodoList};
 use crate::utils::spawn_supervised;
+use crate::worker_profile::{ModelRoute, ToolScope, WorkerRuntimeProfile};
 
 pub mod mailbox;
 #[allow(unused_imports)]
@@ -595,6 +596,16 @@ pub enum SubAgentStatus {
     Cancelled,
 }
 
+/// Structured reason a non-running sub-agent needs parent action.
+///
+/// This is intentionally separate from `SubAgentStatus`: legacy surfaces keep
+/// seeing `Interrupted`, while parent-visible projections get a concrete
+/// question/action instead of a parked child task.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SubAgentNeedsInput {
+    pub question: String,
+}
+
 /// Snapshot of sub-agent state for tool results.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SubAgentResult {
@@ -613,10 +624,14 @@ pub struct SubAgentResult {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub nickname: Option<String>,
     pub status: SubAgentStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worker_status: Option<AgentWorkerStatus>,
     pub result: Option<String>,
     pub steps_taken: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub checkpoint: Option<SubAgentCheckpoint>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub needs_input: Option<SubAgentNeedsInput>,
     pub duration_ms: u64,
     /// `true` when this agent was loaded from a prior-session persisted
     /// state file rather than spawned in the current session (#405).
@@ -677,6 +692,8 @@ pub struct AgentWorkerSpec {
     pub context_mode: String,
     pub fork_context: bool,
     pub tool_profile: AgentWorkerToolProfile,
+    #[serde(default)]
+    pub runtime_profile: WorkerRuntimeProfile,
     pub max_steps: u32,
     pub spawn_depth: u32,
     pub max_spawn_depth: u32,
@@ -745,6 +762,14 @@ pub struct AgentRunVerificationSummary {
     pub summary: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentRunRecommendedAction {
+    pub action: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool: Option<String>,
+    pub reason: String,
+}
+
 /// Structured headless worker event.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AgentWorkerEvent {
@@ -778,6 +803,8 @@ pub struct AgentWorkerRecord {
     pub usage: AgentRunUsage,
     #[serde(default = "default_agent_run_verification")]
     pub verification: AgentRunVerificationSummary,
+    #[serde(default = "default_agent_run_recommended_action")]
+    pub recommended_action: AgentRunRecommendedAction,
     pub status: AgentWorkerStatus,
     pub created_at_ms: u64,
     pub updated_at_ms: u64,
@@ -803,6 +830,8 @@ impl AgentWorkerRecord {
         let artifacts = default_subagent_artifacts(&run_id);
         let follow_up = follow_up_target_for_spec(&spec);
         let takeover = takeover_target_for_spec(&spec);
+        let recommended_action =
+            recommended_action_for_worker_status(AgentWorkerStatus::Starting, &spec);
         Self {
             parent_run_id: spec.parent_run_id.clone(),
             spec,
@@ -812,6 +841,7 @@ impl AgentWorkerRecord {
             artifacts,
             usage: default_agent_run_usage(),
             verification: default_agent_run_verification(),
+            recommended_action,
             status: AgentWorkerStatus::Starting,
             created_at_ms: now_ms,
             updated_at_ms: now_ms,
@@ -873,6 +903,80 @@ fn default_agent_run_verification() -> AgentRunVerificationSummary {
         summary:
             "No verified command or test receipt is attached; treat the result summary as a child self-report."
                 .to_string(),
+    }
+}
+
+fn default_agent_run_recommended_action() -> AgentRunRecommendedAction {
+    AgentRunRecommendedAction {
+        action: "inspect_worker".to_string(),
+        tool: Some(default_agent_eval_tool()),
+        reason: "Legacy record has no computed worker action; inspect the current projection."
+            .to_string(),
+    }
+}
+
+fn recommended_action_for_worker_status(
+    status: AgentWorkerStatus,
+    spec: &AgentWorkerSpec,
+) -> AgentRunRecommendedAction {
+    let agent_ref = spec
+        .session_name
+        .as_deref()
+        .filter(|name| !name.is_empty())
+        .unwrap_or(&spec.worker_id);
+    match status {
+        AgentWorkerStatus::Queued => AgentRunRecommendedAction {
+            action: "wait_for_slot".to_string(),
+            tool: Some(default_agent_eval_tool()),
+            reason: format!(
+                "Worker {agent_ref} is queued; poll with agent_eval or cancel if the queue is no longer useful."
+            ),
+        },
+        AgentWorkerStatus::Starting
+        | AgentWorkerStatus::Running
+        | AgentWorkerStatus::ModelWait
+        | AgentWorkerStatus::RunningTool => AgentRunRecommendedAction {
+            action: "poll_or_send_follow_up".to_string(),
+            tool: Some(default_agent_eval_tool()),
+            reason: format!(
+                "Worker {agent_ref} is active; use nonblocking agent_eval to inspect or steer it."
+            ),
+        },
+        AgentWorkerStatus::WaitingForUser => AgentRunRecommendedAction {
+            action: "provide_follow_up_or_redispatch".to_string(),
+            tool: Some(default_agent_eval_tool()),
+            reason: format!(
+                "Worker {agent_ref} needs parent action; inspect needs_input/checkpoint and re-dispatch or send explicit follow-up."
+            ),
+        },
+        AgentWorkerStatus::Completed => AgentRunRecommendedAction {
+            action: "verify_self_report".to_string(),
+            tool: Some("handle_read".to_string()),
+            reason: format!(
+                "Worker {agent_ref} completed; verify its self-report before treating side effects as fact."
+            ),
+        },
+        AgentWorkerStatus::Failed => AgentRunRecommendedAction {
+            action: "inspect_failure".to_string(),
+            tool: Some(default_agent_eval_tool()),
+            reason: format!(
+                "Worker {agent_ref} failed; inspect the projection and decide whether to open a replacement."
+            ),
+        },
+        AgentWorkerStatus::Cancelled => AgentRunRecommendedAction {
+            action: "open_replacement_if_needed".to_string(),
+            tool: Some("agent_open".to_string()),
+            reason: format!(
+                "Worker {agent_ref} was cancelled; open a replacement only if the assignment still matters."
+            ),
+        },
+        AgentWorkerStatus::Interrupted => AgentRunRecommendedAction {
+            action: "continue_or_redispatch".to_string(),
+            tool: Some(default_agent_eval_tool()),
+            reason: format!(
+                "Worker {agent_ref} was interrupted; inspect checkpoint state before continuing or re-dispatching."
+            ),
+        },
     }
 }
 
@@ -955,8 +1059,57 @@ fn normalize_worker_spec(mut spec: AgentWorkerSpec) -> AgentWorkerSpec {
     spec
 }
 
+fn worker_tool_scope(tool_profile: &AgentWorkerToolProfile) -> ToolScope {
+    match tool_profile {
+        AgentWorkerToolProfile::Inherited => ToolScope::Inherit,
+        AgentWorkerToolProfile::Explicit(tools) => ToolScope::Explicit(tools.clone()),
+    }
+}
+
+fn worker_profile_from_spec(spec: &AgentWorkerSpec) -> WorkerRuntimeProfile {
+    let mut profile = WorkerRuntimeProfile::for_role(spec.agent_type.clone());
+    profile.tools = worker_tool_scope(&spec.tool_profile);
+    profile.model = ModelRoute::Fixed(spec.model.clone());
+    profile.max_spawn_depth = spec.max_spawn_depth.saturating_sub(spec.spawn_depth);
+    profile.background = true;
+    profile
+}
+
+fn worker_model_route_for_spawn(
+    parent_runtime: &SubAgentRuntime,
+    effective_model: &str,
+    explicit_model: bool,
+) -> ModelRoute {
+    if explicit_model {
+        ModelRoute::Fixed(effective_model.to_string())
+    } else if parent_runtime.auto_model {
+        ModelRoute::Auto
+    } else {
+        ModelRoute::Inherit
+    }
+}
+
+fn worker_profile_for_spawn(
+    runtime: &SubAgentRuntime,
+    agent_type: &SubAgentType,
+    tool_profile: &AgentWorkerToolProfile,
+    effective_model: &str,
+    model_route: Option<ModelRoute>,
+) -> WorkerRuntimeProfile {
+    let mut requested = WorkerRuntimeProfile::for_role(agent_type.clone());
+    requested.tools = worker_tool_scope(tool_profile);
+    requested.model = model_route.unwrap_or_else(|| ModelRoute::Fixed(effective_model.to_string()));
+    requested.provider = Some(runtime.client.api_provider().as_str().to_string());
+    requested.max_spawn_depth = runtime.max_spawn_depth.saturating_sub(runtime.spawn_depth);
+    requested.background = true;
+    runtime.worker_profile.derive_child(&requested)
+}
+
 fn normalize_worker_record(mut record: AgentWorkerRecord) -> AgentWorkerRecord {
     record.spec = normalize_worker_spec(record.spec);
+    if record.spec.runtime_profile == WorkerRuntimeProfile::default() {
+        record.spec.runtime_profile = worker_profile_from_spec(&record.spec);
+    }
     let run_id = agent_worker_run_id(&record.spec);
     if record.actor_kind.is_empty() {
         record.actor_kind = default_subagent_actor_kind();
@@ -970,6 +1123,7 @@ fn normalize_worker_record(mut record: AgentWorkerRecord) -> AgentWorkerRecord {
     if record.takeover.agent_id.is_empty() {
         record.takeover = takeover_target_for_spec(&record.spec);
     }
+    record.recommended_action = recommended_action_for_worker_status(record.status, &record.spec);
     if record.artifacts.is_empty() {
         record.artifacts = default_subagent_artifacts(&run_id);
     }
@@ -1013,6 +1167,7 @@ fn run_git(workspace: &Path, args: &[&str]) -> Option<String> {
 pub(crate) struct SubAgentSpawnOptions {
     pub name: Option<String>,
     pub model: Option<String>,
+    pub model_route: Option<ModelRoute>,
     pub nickname: Option<String>,
     pub fork_context: bool,
 }
@@ -1129,6 +1284,8 @@ struct PersistedSubAgent {
     steps_taken: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     checkpoint: Option<SubAgentCheckpoint>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    needs_input: Option<SubAgentNeedsInput>,
     duration_ms: u64,
     allowed_tools: Vec<String>,
     updated_at_ms: u64,
@@ -1212,6 +1369,10 @@ pub struct SubAgentRuntime {
     pub role_models: HashMap<String, String>,
     pub context: ToolContext,
     pub allow_shell: bool,
+    /// Capability contract inherited by descendants. `agent_open` derives a
+    /// child profile from this before registering the worker record so parent,
+    /// sub-agent, and fleet projections share one worker contract.
+    pub worker_profile: WorkerRuntimeProfile,
     pub event_tx: Option<mpsc::Sender<Event>>,
     /// Manager handle so children can recurse via `agent_spawn`. All agents
     /// at every depth share the same manager.
@@ -1276,6 +1437,7 @@ impl SubAgentRuntime {
             role_models: HashMap::new(),
             context,
             allow_shell,
+            worker_profile: WorkerRuntimeProfile::for_role(SubAgentType::General),
             event_tx,
             manager,
             spawn_depth: 0,
@@ -1429,6 +1591,7 @@ impl SubAgentRuntime {
             role_models: self.role_models.clone(),
             context: child_context,
             allow_shell: self.allow_shell,
+            worker_profile: self.worker_profile.clone(),
             event_tx: self.event_tx.clone(),
             manager: self.manager.clone(),
             spawn_depth: self.spawn_depth + 1,
@@ -1464,6 +1627,7 @@ pub struct SubAgent {
     pub result: Option<String>,
     pub steps_taken: u32,
     pub checkpoint: Option<SubAgentCheckpoint>,
+    pub needs_input: Option<SubAgentNeedsInput>,
     pub started_at: Instant,
     pub last_activity_at: Instant,
     /// `None` = full registry inheritance, with approval-gated tools still
@@ -1511,6 +1675,7 @@ impl SubAgent {
             result: None,
             steps_taken: 0,
             checkpoint: None,
+            needs_input: None,
             started_at,
             last_activity_at: started_at,
             allowed_tools,
@@ -1536,9 +1701,11 @@ impl SubAgent {
             model: self.model.clone(),
             nickname: self.nickname.clone(),
             status: self.status.clone(),
+            worker_status: None,
             result: self.result.clone(),
             steps_taken: self.steps_taken,
             checkpoint: self.checkpoint.clone(),
+            needs_input: self.needs_input.clone(),
             duration_ms: u64::try_from(self.started_at.elapsed().as_millis()).unwrap_or(u64::MAX),
             // Snapshots from the agent itself don't know the manager's
             // current boot id, so default to false. The manager fills
@@ -1660,6 +1827,7 @@ impl SubAgentManager {
                 result: agent.result.clone(),
                 steps_taken: agent.steps_taken,
                 checkpoint: agent.checkpoint.clone(),
+                needs_input: agent.needs_input.clone(),
                 duration_ms: u64::try_from(agent.started_at.elapsed().as_millis())
                     .unwrap_or(u64::MAX),
                 // Backward-compat: Vec on disk. None → empty vec; Some(list) → list.
@@ -1745,6 +1913,7 @@ impl SubAgentManager {
                 result: persisted.result,
                 steps_taken: persisted.steps_taken,
                 checkpoint: persisted.checkpoint,
+                needs_input: persisted.needs_input,
                 started_at,
                 last_activity_at: started_at,
                 allowed_tools,
@@ -1860,6 +2029,7 @@ impl SubAgentManager {
             return;
         };
         record.status = status;
+        record.recommended_action = recommended_action_for_worker_status(status, &record.spec);
         record.updated_at_ms = now_ms;
         record.latest_message = message.clone();
         if matches!(
@@ -2112,6 +2282,18 @@ impl SubAgentManager {
         let agent_id = agent.id.clone();
         let started_at = agent.started_at;
         let max_steps = self.max_steps;
+        let tool_profile = match tools.clone() {
+            Some(tools) => AgentWorkerToolProfile::Explicit(tools),
+            None => AgentWorkerToolProfile::Inherited,
+        };
+        let runtime_profile = worker_profile_for_spawn(
+            &runtime,
+            &agent_type,
+            &tool_profile,
+            &agent.model,
+            options.model_route.clone(),
+        );
+        runtime.worker_profile = runtime_profile.clone();
         let worker_spec = AgentWorkerSpec {
             worker_id: agent_id.clone(),
             run_id: agent_id.clone(),
@@ -2130,10 +2312,8 @@ impl SubAgentManager {
             }
             .to_string(),
             fork_context: options.fork_context,
-            tool_profile: match tools.clone() {
-                Some(tools) => AgentWorkerToolProfile::Explicit(tools),
-                None => AgentWorkerToolProfile::Inherited,
-            },
+            tool_profile,
+            runtime_profile,
             max_steps,
             spawn_depth: runtime.spawn_depth,
             max_spawn_depth: runtime.max_spawn_depth,
@@ -2463,6 +2643,10 @@ impl SubAgentManager {
     fn snapshot_for_listing(&self, agent: &SubAgent) -> SubAgentResult {
         let mut snap = agent.snapshot();
         snap.from_prior_session = self.is_from_prior_session(agent);
+        snap.worker_status = self
+            .worker_records
+            .get(&agent.id)
+            .map(|record| record.status);
         snap
     }
 
@@ -2569,6 +2753,10 @@ impl SubAgentManager {
             agent.result = result.result.clone();
             agent.steps_taken = result.steps_taken;
             agent.checkpoint = result.checkpoint.clone();
+            agent.needs_input = result.needs_input.clone();
+            if result.status != SubAgentStatus::Running {
+                agent.input_tx = None;
+            }
             agent.task_handle = None;
             changed = true;
         }
@@ -2583,6 +2771,7 @@ impl SubAgentManager {
         if let Some(agent) = self.agents.get_mut(agent_id) {
             agent.status = SubAgentStatus::Failed(error.clone());
             release_resident_leases_for(agent_id);
+            agent.input_tx = None;
             agent.task_handle = None;
             changed = true;
         }
@@ -2608,6 +2797,7 @@ impl SubAgentManager {
         agent_id: &str,
         reason: String,
         checkpoint: SubAgentCheckpoint,
+        needs_input: Option<SubAgentNeedsInput>,
     ) -> Result<SubAgentResult> {
         let snapshot = {
             let agent = self
@@ -2618,6 +2808,7 @@ impl SubAgentManager {
             agent.result = Some(reason);
             agent.steps_taken = checkpoint.steps_taken;
             agent.checkpoint = Some(checkpoint);
+            agent.needs_input = needs_input;
             agent.last_activity_at = Instant::now();
             release_resident_leases_for(agent_id);
             agent.snapshot()
@@ -2720,6 +2911,8 @@ pub struct SubAgentSessionProjection {
     pub snapshot: SubAgentResult,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub checkpoint: Option<SubAgentCheckpoint>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub needs_input: Option<SubAgentNeedsInput>,
     #[serde(default, skip_serializing_if = "is_false")]
     pub continuable: bool,
     #[serde(default, skip_serializing_if = "is_false")]
@@ -2778,6 +2971,7 @@ async fn subagent_session_projection(
         "duration_ms": snapshot.duration_ms,
         "assignment": snapshot.assignment.clone(),
         "checkpoint": snapshot.checkpoint.clone(),
+        "needs_input": snapshot.needs_input.clone(),
         "snapshot": snapshot.clone(),
     });
     let transcript_handle = {
@@ -2839,12 +3033,17 @@ async fn subagent_session_projection(
         .as_ref()
         .map(|record| record.verification.clone())
         .unwrap_or_else(default_agent_run_verification);
+    let status = worker_record
+        .as_ref()
+        .map(|record| agent_worker_status_name(record.status))
+        .unwrap_or_else(|| subagent_status_name(&snapshot.status))
+        .to_string();
 
     SubAgentSessionProjection {
         name: snapshot.name.clone(),
         agent_id: snapshot.agent_id.clone(),
         run_id,
-        status: subagent_status_name(&snapshot.status).to_string(),
+        status,
         terminal: snapshot.status != SubAgentStatus::Running,
         context_mode: snapshot.context_mode.clone(),
         fork_context: snapshot.fork_context,
@@ -2856,6 +3055,7 @@ async fn subagent_session_projection(
         usage,
         verification,
         checkpoint: snapshot.checkpoint.clone(),
+        needs_input: snapshot.needs_input.clone(),
         continuable: subagent_checkpoint_is_continuable(&snapshot),
         snapshot,
         timed_out,
@@ -3387,6 +3587,7 @@ impl ToolSpec for AgentSpawnTool {
                 &spawn_request.agent_type,
             )?,
         };
+        let configured_model_was_explicit = configured_model.is_some();
 
         // Cache-aware resident mode (#529): prepend file contents to the prompt
         // so the child's prefix is byte-stable for DeepSeek prefix caching.
@@ -3433,6 +3634,11 @@ impl ToolSpec for AgentSpawnTool {
         child_runtime.reasoning_effort = route.reasoning_effort.clone();
         child_runtime.reasoning_effort_auto = false;
         let effective_model = route.model;
+        let model_route = worker_model_route_for_spawn(
+            &self.runtime,
+            &effective_model,
+            configured_model_was_explicit,
+        );
 
         let mut manager = self.manager.write().await;
 
@@ -3447,6 +3653,7 @@ impl ToolSpec for AgentSpawnTool {
                 SubAgentSpawnOptions {
                     name: spawn_request.session_name.clone(),
                     model: Some(effective_model),
+                    model_route: Some(model_route),
                     nickname: None,
                     fork_context: spawn_request.fork_context,
                 },
@@ -3623,22 +3830,46 @@ impl ToolSpec for AgentEvalTool {
         if continue_from_checkpoint {
             let delivery_preview = message.clone();
             let mut manager = self.manager.write().await;
-            manager
-                .continue_checkpointed(&agent_id, message, interrupt)
-                .map_err(|e| ToolError::execution_failed(e.to_string()))?;
-            manager.record_follow_up_delivery(
-                &agent_id,
-                true,
-                delivery_preview.as_deref(),
-                None,
-                interrupt,
-                true,
-            );
-            manager.persist_state_best_effort();
-            message_delivery = Some(json!({
-                "delivered": true,
-                "continued_from_checkpoint": true
-            }));
+            match manager.continue_checkpointed(&agent_id, message, interrupt) {
+                Ok(_) => {
+                    manager.record_follow_up_delivery(
+                        &agent_id,
+                        true,
+                        delivery_preview.as_deref(),
+                        None,
+                        interrupt,
+                        true,
+                    );
+                    manager.persist_state_best_effort();
+                    message_delivery = Some(json!({
+                        "delivered": true,
+                        "continued_from_checkpoint": true
+                    }));
+                }
+                Err(err) => {
+                    let reason = err.to_string();
+                    let is_detached_checkpoint = reason.contains("no live child task")
+                        || reason.contains("Failed to continue checkpointed");
+                    if !is_detached_checkpoint {
+                        return Err(ToolError::execution_failed(reason));
+                    }
+                    manager.record_follow_up_delivery(
+                        &agent_id,
+                        false,
+                        delivery_preview.as_deref(),
+                        Some(&reason),
+                        interrupt,
+                        true,
+                    );
+                    manager.persist_state_best_effort();
+                    message_delivery = Some(json!({
+                        "delivered": false,
+                        "continued_from_checkpoint": false,
+                        "reason": reason,
+                        "next_action": "re-dispatch using the returned needs_input and checkpoint"
+                    }));
+                }
+            }
         } else if let Some(message) = message {
             let terminal = {
                 let manager = self.manager.read().await;
@@ -4873,6 +5104,8 @@ pub(crate) fn emit_parent_completion(
 /// telemetry, but it is volatile and not useful for model coordination.
 fn subagent_done_sentinel(agent_id: &str, res: &SubAgentResult) -> String {
     let clipped = subagent_result_clipped(res);
+    let needs_input = res.needs_input.clone();
+    let needs_input_present = needs_input.is_some();
     let payload = json!({
         "agent_id": agent_id,
         "agent_type": res.agent_type.as_str(),
@@ -4880,10 +5113,21 @@ fn subagent_done_sentinel(agent_id: &str, res: &SubAgentResult) -> String {
         "summary_location": "previous_line",
         "result_clipped": clipped,
         "summary_complete": !clipped,
+        "needs_input": needs_input,
         // What the parent should do next: trust the previous-line summary, or
         // fetch the full transcript with agent_eval when it was clipped.
-        "next_action": if clipped { "call_agent_eval" } else { "use_summary" },
-        "details": "agent_eval",
+        "next_action": if needs_input_present {
+            "redispatch_worker"
+        } else if clipped {
+            "call_agent_eval"
+        } else {
+            "use_summary"
+        },
+        "details": if needs_input_present {
+            "agent_eval projection includes needs_input.question and checkpoint"
+        } else {
+            "agent_eval"
+        },
     });
     format!("<codewhale:subagent.done>{payload}</codewhale:subagent.done>")
 }
@@ -5013,6 +5257,18 @@ async fn checkpoint_subagent_progress(
     checkpoint
 }
 
+fn needs_input_for_interrupted_checkpoint(
+    reason: &str,
+    checkpoint: &SubAgentCheckpoint,
+) -> SubAgentNeedsInput {
+    SubAgentNeedsInput {
+        question: format!(
+            "Sub-agent interrupted before completion ({reason}). Re-dispatch this worker or provide explicit follow-up using checkpoint {}.",
+            checkpoint.continuation_handle
+        ),
+    }
+}
+
 fn record_agent_progress(runtime: &SubAgentRuntime, agent_id: &str, message: impl Into<String>) {
     let message = message.into();
     if let Ok(mut manager) = runtime.manager.try_write() {
@@ -5083,7 +5339,7 @@ async fn run_subagent(
     let mut consecutive_truncated_responses = 0;
     let mut latest_checkpoint: Option<SubAgentCheckpoint> = None;
 
-    'steps_loop: for _step in 0..max_steps {
+    for _step in 0..max_steps {
         // Cooperative cancellation: bail if this session's token was cancelled
         // while we were between steps. Top-level model-visible sub-agents use
         // a detached token so parent turn cancellation does not stop them.
@@ -5131,9 +5387,11 @@ async fn run_subagent(
                 model: runtime.model.clone(),
                 nickname: None,
                 status,
+                worker_status: None,
                 result: None,
                 steps_taken: steps,
                 checkpoint: latest_checkpoint.clone(),
+                needs_input: None,
                 duration_ms,
                 from_prior_session: false,
             });
@@ -5244,9 +5502,11 @@ async fn run_subagent(
                         model: runtime.model.clone(),
                         nickname: None,
                         status,
+                        worker_status: None,
                         result: None,
                         steps_taken: steps,
                         checkpoint: latest_checkpoint.clone(),
+                        needs_input: None,
                         duration_ms,
                         from_prior_session: false,
                     });
@@ -5268,7 +5528,6 @@ async fn run_subagent(
                                 true,
                             )
                             .await;
-                            latest_checkpoint = Some(checkpoint.clone());
                             record_agent_progress(
                                 runtime,
                                 &agent_id,
@@ -5291,91 +5550,33 @@ async fn run_subagent(
                                 fork_context_enabled,
                             )
                             .await;
+                            let needs_input =
+                                needs_input_for_interrupted_checkpoint(&reason, &checkpoint);
                             let interrupted_snapshot = {
                                 let mut manager = runtime.manager.write().await;
                                 manager.interrupt_with_checkpoint(
                                     &agent_id,
                                     reason.clone(),
                                     checkpoint.clone(),
+                                    Some(needs_input.clone()),
                                 )?
                             };
+                            record_agent_progress(
+                                runtime,
+                                &agent_id,
+                                format!(
+                                    "{}: waiting for user; {}",
+                                    format_step_counter(steps, max_steps),
+                                    needs_input.question
+                                ),
+                            );
                             if let Some(mb) = runtime.mailbox.as_ref() {
                                 let _ = mb.send(MailboxMessage::Interrupted {
                                     agent_id: agent_id.clone(),
                                     reason: reason.clone(),
                                 });
                             }
-
-                            let next_input = tokio::select! {
-                                biased;
-                                () = runtime.cancel_token.cancelled() => {
-                                    record_agent_progress(
-                                        runtime,
-                                        &agent_id,
-                                        format!("{}: cancelled while interrupted", format_step_counter(steps, max_steps)),
-                                    );
-                                    if let Some(mb) = runtime.mailbox.as_ref() {
-                                        let _ = mb.send(MailboxMessage::Cancelled {
-                                            agent_id: agent_id.clone(),
-                                        });
-                                    }
-                                    let status = SubAgentStatus::Cancelled;
-                                    let duration_ms = u64::try_from(started_at.elapsed().as_millis())
-                                        .unwrap_or(u64::MAX);
-                                    insert_subagent_full_transcript_handle(
-                                        runtime,
-                                        &agent_id,
-                                        &agent_type,
-                                        &assignment,
-                                        &status,
-                                        None,
-                                        latest_checkpoint.as_ref(),
-                                        &messages,
-                                        steps,
-                                        duration_ms,
-                                        fork_context_enabled,
-                                    )
-                                    .await;
-                                    return Ok(SubAgentResult {
-                                        name: agent_id.clone(),
-                                        agent_id: agent_id.clone(),
-                                        context_mode: if fork_context_enabled { "forked" } else { "fresh" }.to_string(),
-                                        fork_context: fork_context_enabled,
-                                        workspace: Some(runtime.context.workspace.clone()),
-                                        git_branch: current_git_branch(&runtime.context.workspace),
-                                        agent_type: agent_type.clone(),
-                                        assignment: assignment.clone(),
-                                        model: runtime.model.clone(),
-                                        nickname: None,
-                                        status,
-                                        result: None,
-                                        steps_taken: steps,
-                                        checkpoint: latest_checkpoint.clone(),
-                                        duration_ms,
-                                        from_prior_session: false,
-                                    });
-                                }
-                                input = input_rx.recv() => input,
-                            };
-                            let Some(input) = next_input else {
-                                return Ok(interrupted_snapshot);
-                            };
-                            if input.interrupt {
-                                pending_inputs.clear();
-                            }
-                            pending_inputs.push_back(input);
-                            latest_checkpoint = Some(
-                                checkpoint_subagent_progress(
-                                    runtime,
-                                    &agent_id,
-                                    "continued_after_api_timeout",
-                                    &messages,
-                                    steps,
-                                    true,
-                                )
-                                .await,
-                            );
-                            continue 'steps_loop;
+                            return Ok(interrupted_snapshot);
                         }
                     }
                 }
@@ -5607,9 +5808,11 @@ async fn run_subagent(
         model: runtime.model.clone(),
         nickname: None,
         status,
+        worker_status: None,
         result: final_result,
         steps_taken: steps,
         checkpoint: latest_checkpoint,
+        needs_input: None,
         duration_ms,
         from_prior_session: false,
     })
@@ -6393,6 +6596,21 @@ fn worker_status_from_subagent_status(status: &SubAgentStatus) -> AgentWorkerSta
     }
 }
 
+pub fn agent_worker_status_name(status: AgentWorkerStatus) -> &'static str {
+    match status {
+        AgentWorkerStatus::Queued => "queued",
+        AgentWorkerStatus::Starting => "starting",
+        AgentWorkerStatus::Running => "running",
+        AgentWorkerStatus::WaitingForUser => "waiting_for_user",
+        AgentWorkerStatus::ModelWait => "model_wait",
+        AgentWorkerStatus::RunningTool => "running_tool",
+        AgentWorkerStatus::Completed => "completed",
+        AgentWorkerStatus::Failed => "failed",
+        AgentWorkerStatus::Cancelled => "cancelled",
+        AgentWorkerStatus::Interrupted => "interrupted",
+    }
+}
+
 fn worker_status_from_subagent_result(result: &SubAgentResult) -> AgentWorkerStatus {
     if subagent_checkpoint_is_continuable(result) {
         AgentWorkerStatus::WaitingForUser
@@ -6744,6 +6962,9 @@ fn annotate_child_model_error(err: &str, model: &str) -> String {
 }
 
 fn summarize_subagent_result(result: &SubAgentResult) -> String {
+    if let Some(needs_input) = result.needs_input.as_ref() {
+        return format!("Needs input: {}", needs_input.question);
+    }
     match (&result.status, result.result.as_ref()) {
         (SubAgentStatus::Completed, Some(text)) => truncate_preview(text),
         (SubAgentStatus::Completed, None) => "Completed (no output)".to_string(),

@@ -21,6 +21,7 @@ use super::host::FleetHostKind;
 use crate::tools::subagent::{
     AgentWorkerSpec, AgentWorkerStatus, AgentWorkerToolProfile, SubAgentType,
 };
+use crate::worker_profile::{ModelRoute, ToolScope, WorkerRuntimeProfile};
 
 /// Map a fleet worker spec's host kind to a display string.
 pub fn fleet_host_kind_for_spec(spec: &FleetWorkerSpec) -> FleetHostKind {
@@ -58,6 +59,9 @@ pub fn fleet_task_to_worker_spec(
     let tool_profile = fleet_tool_profile(task_spec.worker.as_ref());
 
     let objective = fleet_task_prompt(task_spec);
+    let max_spawn_depth = codewhale_config::FleetExecConfig::default().max_spawn_depth;
+    let runtime_profile =
+        fleet_worker_runtime_profile(&agent_type, &tool_profile, model, 0, max_spawn_depth);
 
     AgentWorkerSpec {
         worker_id: worker_id.to_string(),
@@ -73,13 +77,14 @@ pub fn fleet_task_to_worker_spec(
         context_mode: "fresh".to_string(),
         fork_context: false,
         tool_profile,
+        runtime_profile,
         max_steps: task_spec
             .budget
             .as_ref()
             .and_then(|b| b.max_tool_calls)
             .unwrap_or(u32::MAX),
         spawn_depth: 0,
-        max_spawn_depth: codewhale_config::FleetExecConfig::default().max_spawn_depth,
+        max_spawn_depth,
     }
 }
 
@@ -143,6 +148,28 @@ fn fleet_tool_profile(profile: Option<&FleetTaskWorkerProfile>) -> AgentWorkerTo
         Some(p) if !p.tools.is_empty() => AgentWorkerToolProfile::Explicit(p.tools.clone()),
         _ => AgentWorkerToolProfile::Inherited,
     }
+}
+
+fn fleet_worker_runtime_profile(
+    agent_type: &SubAgentType,
+    tool_profile: &AgentWorkerToolProfile,
+    model: &str,
+    spawn_depth: u32,
+    max_spawn_depth: u32,
+) -> WorkerRuntimeProfile {
+    let mut profile = WorkerRuntimeProfile::for_role(agent_type.clone());
+    profile.tools = match tool_profile {
+        AgentWorkerToolProfile::Inherited => ToolScope::Inherit,
+        AgentWorkerToolProfile::Explicit(tools) => ToolScope::Explicit(tools.clone()),
+    };
+    profile.model = if model == "auto" {
+        ModelRoute::Auto
+    } else {
+        ModelRoute::Fixed(model.to_string())
+    };
+    profile.max_spawn_depth = max_spawn_depth.saturating_sub(spawn_depth);
+    profile.background = true;
+    profile
 }
 
 /// Create a fleet artifact ref from a worker output.
@@ -214,10 +241,15 @@ pub fn apply_exec_hardening(
     spec.max_spawn_depth = exec
         .max_spawn_depth
         .min(codewhale_config::MAX_SPAWN_DEPTH_CEILING);
+    spec.runtime_profile.max_spawn_depth = spec.max_spawn_depth.saturating_sub(spec.spawn_depth);
 
     // Apply tool filtering
     if !exec.allowed_tools.is_empty() || !exec.disallowed_tools.is_empty() {
         spec.tool_profile = filter_tool_profile(&spec.tool_profile, exec);
+        spec.runtime_profile.tools = match &spec.tool_profile {
+            AgentWorkerToolProfile::Inherited => ToolScope::Inherit,
+            AgentWorkerToolProfile::Explicit(tools) => ToolScope::Explicit(tools.clone()),
+        };
     }
 
     // Append system prompt
@@ -464,6 +496,7 @@ mod tests {
             context_mode: "fresh".to_string(),
             fork_context: false,
             tool_profile: AgentWorkerToolProfile::Inherited,
+            runtime_profile: WorkerRuntimeProfile::for_role(SubAgentType::General),
             max_steps: 1000,
             spawn_depth: 0,
             max_spawn_depth: 0,
@@ -492,6 +525,7 @@ mod tests {
             context_mode: "fresh".to_string(),
             fork_context: false,
             tool_profile: AgentWorkerToolProfile::Inherited,
+            runtime_profile: WorkerRuntimeProfile::for_role(SubAgentType::General),
             max_steps: 1000,
             spawn_depth: 0,
             max_spawn_depth: 0,
@@ -610,6 +644,7 @@ mod tests {
             context_mode: "fresh".to_string(),
             fork_context: false,
             tool_profile: AgentWorkerToolProfile::Inherited,
+            runtime_profile: WorkerRuntimeProfile::for_role(SubAgentType::General),
             max_steps: 100,
             spawn_depth: 0,
             max_spawn_depth: 0,
