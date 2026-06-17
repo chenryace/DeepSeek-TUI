@@ -165,23 +165,34 @@ for the current turn."
 /// in `prompts/base.md` can reference it without the model having to
 /// guess from the user's first message. `locale_tag` is resolved by
 /// the caller from `Settings` so this function stays I/O-free.
-fn render_environment_block(workspace: &Path, locale_tag: &str) -> String {
+fn render_environment_block(_workspace: &Path, locale_tag: &str) -> String {
     let codewhale_version = env!("CARGO_PKG_VERSION");
     let platform = std::env::consts::OS;
     let shell = crate::shell_dispatcher::global_dispatcher()
         .kind()
         .binary()
         .to_string();
-    let pwd = workspace.display();
 
+    // The workspace path (`pwd`) is intentionally delivered per-turn via the
+    // `<turn_meta>` block (see `turn_metadata_block`) rather than embedded here.
+    //
+    // Rationale: when the workspace path changes between sessions (e.g. an
+    // ephemeral per-session workspace), a volatile value inside the otherwise
+    // static system prefix invalidates the inference server's prefix cache at
+    // that exact point. The cache then only partially matches and the tail must
+    // be re-prefilled from the divergence boundary. On backends that pair prefix
+    // caching with speculative decoding, this partial re-prefill can perturb the
+    // logits at the boundary enough to degrade structured tool-call emission
+    // (the model regresses to bare text). Keeping the static system prefix
+    // byte-identical across sessions lets the prefix cache be reused; the live
+    // workspace path still reaches the model every turn through `turn_meta`.
     format!(
         "## Environment\n\
          \n\
          - lang: {locale_tag}\n\
          - codewhale_version: {codewhale_version}\n\
          - platform: {platform}\n\
-         - shell: {shell}\n\
-         - pwd: {pwd}"
+         - shell: {shell}"
     )
 }
 
@@ -1942,7 +1953,8 @@ mod tests {
             "- codewhale_version: {}",
             env!("CARGO_PKG_VERSION")
         )));
-        assert!(block.contains(&format!("- pwd: {}", tmp.path().display())));
+        // pwd is now delivered per-turn via `turn_meta`, not in the static block.
+        assert!(!block.contains("- pwd:"));
         assert!(block.contains("- platform:"));
         assert!(block.contains("- shell:"));
     }

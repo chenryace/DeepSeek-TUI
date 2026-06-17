@@ -1489,6 +1489,10 @@ impl Engine {
 
         let mut lines = vec![
             format!("Current local date: {today}"),
+            // Workspace path moved here from the static `## Environment` block so
+            // the static system prefix stays byte-stable across sessions (see
+            // `render_environment_block` for the prefix-cache rationale).
+            format!("Current workspace: {}", self.config.workspace.display()),
             format!("Current model: {routed_model}"),
         ];
         if auto_model {
