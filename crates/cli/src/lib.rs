@@ -35,6 +35,15 @@ enum ProviderArg {
     Novita,
     Fireworks,
     Siliconflow,
+    #[value(
+        alias = "silicon-flow-cn",
+        alias = "siliconflow-CN",
+        alias = "silicon_flow_cn",
+        alias = "siliconflow_cn",
+        alias = "siliconflow-china",
+        alias = "siliconflow_china"
+    )]
+    SiliconflowCn,
     Arcee,
     Moonshot,
     Sglang,
@@ -65,6 +74,7 @@ impl From<ProviderArg> for ProviderKind {
             ProviderArg::Novita => ProviderKind::Novita,
             ProviderArg::Fireworks => ProviderKind::Fireworks,
             ProviderArg::Siliconflow => ProviderKind::Siliconflow,
+            ProviderArg::SiliconflowCn => ProviderKind::SiliconflowCN,
             ProviderArg::Arcee => ProviderKind::Arcee,
             ProviderArg::Moonshot => ProviderKind::Moonshot,
             ProviderArg::Sglang => ProviderKind::Sglang,
@@ -896,7 +906,7 @@ fn run_logout_command(store: &mut ConfigStore) -> Result<()> {
 fn run_logout_command_with_secrets(store: &mut ConfigStore, secrets: &Secrets) -> Result<()> {
     let active_provider = store.config.provider;
     store.config.api_key = None;
-    for provider in PROVIDER_LIST {
+    for provider in ProviderKind::ALL {
         clear_provider_api_key_from_config(store, provider);
     }
     clear_provider_api_key_from_keyring(secrets, active_provider);
@@ -909,106 +919,10 @@ fn run_logout_command_with_secrets(store: &mut ConfigStore, secrets: &Secrets) -
 /// Map [`ProviderKind`] to the canonical provider credential slot.
 fn provider_slot(provider: ProviderKind) -> &'static str {
     match provider {
-        ProviderKind::Deepseek => "deepseek",
-        ProviderKind::NvidiaNim => "nvidia-nim",
-        ProviderKind::Openai => "openai",
-        ProviderKind::Atlascloud => "atlascloud",
-        ProviderKind::WanjieArk => "wanjie-ark",
-        ProviderKind::Volcengine => "volcengine",
-        ProviderKind::Openrouter => "openrouter",
-        ProviderKind::XiaomiMimo => "xiaomi-mimo",
-        ProviderKind::Novita => "novita",
-        ProviderKind::Fireworks => "fireworks",
-        ProviderKind::Siliconflow => "siliconflow",
+        // Keep the historical shared credential slot for the China endpoint.
         ProviderKind::SiliconflowCN => "siliconflow",
-        ProviderKind::Arcee => "arcee",
-        ProviderKind::Moonshot => "moonshot",
-        ProviderKind::Sglang => "sglang",
-        ProviderKind::Vllm => "vllm",
-        ProviderKind::Ollama => "ollama",
-        ProviderKind::Huggingface => "huggingface",
-        ProviderKind::Together => "together",
-        ProviderKind::OpenaiCodex => "openai-codex",
-        ProviderKind::Anthropic => "anthropic",
-        ProviderKind::Zai => "zai",
-        ProviderKind::Stepfun => "stepfun",
-        ProviderKind::Minimax => "minimax",
-        ProviderKind::Deepinfra => "deepinfra",
+        _ => provider.provider().id(),
     }
-}
-
-/// Provider order used by the `auth list` and `auth status` outputs.
-const PROVIDER_LIST: [ProviderKind; 25] = [
-    ProviderKind::Deepseek,
-    ProviderKind::NvidiaNim,
-    ProviderKind::Openai,
-    ProviderKind::Atlascloud,
-    ProviderKind::WanjieArk,
-    ProviderKind::Volcengine,
-    ProviderKind::Openrouter,
-    ProviderKind::XiaomiMimo,
-    ProviderKind::Novita,
-    ProviderKind::Fireworks,
-    ProviderKind::Siliconflow,
-    ProviderKind::SiliconflowCN,
-    ProviderKind::Arcee,
-    ProviderKind::Moonshot,
-    ProviderKind::Sglang,
-    ProviderKind::Vllm,
-    ProviderKind::Ollama,
-    ProviderKind::Huggingface,
-    ProviderKind::Together,
-    ProviderKind::OpenaiCodex,
-    ProviderKind::Anthropic,
-    ProviderKind::Zai,
-    ProviderKind::Stepfun,
-    ProviderKind::Minimax,
-    ProviderKind::Deepinfra,
-];
-
-fn provider_is_supported_by_tui(provider: ProviderKind) -> bool {
-    matches!(
-        provider,
-        ProviderKind::Deepseek
-            | ProviderKind::NvidiaNim
-            | ProviderKind::Openai
-            | ProviderKind::Atlascloud
-            | ProviderKind::WanjieArk
-            | ProviderKind::Volcengine
-            | ProviderKind::Openrouter
-            | ProviderKind::XiaomiMimo
-            | ProviderKind::Novita
-            | ProviderKind::Fireworks
-            | ProviderKind::Siliconflow
-            | ProviderKind::SiliconflowCN
-            | ProviderKind::Arcee
-            | ProviderKind::Moonshot
-            | ProviderKind::Sglang
-            | ProviderKind::Vllm
-            | ProviderKind::Ollama
-            | ProviderKind::Huggingface
-            | ProviderKind::Together
-            | ProviderKind::OpenaiCodex
-            | ProviderKind::Zai
-            | ProviderKind::Stepfun
-            | ProviderKind::Minimax
-    )
-    // NOTE: Anthropic is intentionally exec-only in the interactive TUI: it
-    // speaks the native Messages API rather than the OpenAI-compatible shape the
-    // interactive loop expects, so `codewhale --provider anthropic` is rejected
-    // with a hint to use `codewhale exec --provider anthropic`. Zai (GLM/Z.AI),
-    // Stepfun, and Minimax are OpenAI-compatible and supported interactively.
-    // (Re-evaluate if/when the interactive loop gains a native Anthropic client.)
-}
-
-fn supported_tui_providers_csv() -> String {
-    ProviderKind::ALL
-        .iter()
-        .copied()
-        .filter(|provider| provider_is_supported_by_tui(*provider))
-        .map(ProviderKind::as_str)
-        .collect::<Vec<_>>()
-        .join(", ")
 }
 
 #[cfg(test)]
@@ -1053,41 +967,7 @@ fn provider_env_set(provider: ProviderKind) -> bool {
 }
 
 fn provider_env_vars(provider: ProviderKind) -> &'static [&'static str] {
-    match provider {
-        ProviderKind::Deepseek => &["DEEPSEEK_API_KEY"],
-        ProviderKind::Openrouter => &["OPENROUTER_API_KEY"],
-        ProviderKind::XiaomiMimo => &["XIAOMI_MIMO_API_KEY", "XIAOMI_API_KEY", "MIMO_API_KEY"],
-        ProviderKind::Novita => &["NOVITA_API_KEY"],
-        ProviderKind::NvidiaNim => &["NVIDIA_API_KEY", "NVIDIA_NIM_API_KEY", "DEEPSEEK_API_KEY"],
-        ProviderKind::Fireworks => &["FIREWORKS_API_KEY"],
-        ProviderKind::Siliconflow => &["SILICONFLOW_API_KEY"],
-        ProviderKind::SiliconflowCN => &["SILICONFLOW_API_KEY"],
-        ProviderKind::Arcee => &["ARCEE_API_KEY"],
-        ProviderKind::Moonshot => &["MOONSHOT_API_KEY", "KIMI_API_KEY"],
-        ProviderKind::Sglang => &["SGLANG_API_KEY"],
-        ProviderKind::Vllm => &["VLLM_API_KEY"],
-        ProviderKind::Ollama => &["OLLAMA_API_KEY"],
-        ProviderKind::Huggingface => &["HUGGINGFACE_API_KEY", "HF_TOKEN"],
-        ProviderKind::Openai => &["OPENAI_API_KEY"],
-        ProviderKind::Atlascloud => &["ATLASCLOUD_API_KEY"],
-        ProviderKind::Volcengine => &[
-            "VOLCENGINE_API_KEY",
-            "VOLCENGINE_ARK_API_KEY",
-            "ARK_API_KEY",
-        ],
-        ProviderKind::WanjieArk => &[
-            "WANJIE_ARK_API_KEY",
-            "WANJIE_API_KEY",
-            "WANJIE_MAAS_API_KEY",
-        ],
-        ProviderKind::Together => &["TOGETHER_API_KEY"],
-        ProviderKind::OpenaiCodex => &["OPENAI_CODEX_ACCESS_TOKEN", "CODEX_ACCESS_TOKEN"],
-        ProviderKind::Anthropic => &["ANTHROPIC_API_KEY"],
-        ProviderKind::Zai => &["ZAI_API_KEY", "Z_AI_API_KEY"],
-        ProviderKind::Stepfun => &["STEPFUN_API_KEY", "STEP_API_KEY"],
-        ProviderKind::Minimax => &["MINIMAX_API_KEY"],
-        ProviderKind::Deepinfra => &["DEEPINFRA_API_KEY", "DEEPINFRA_TOKEN"],
-    }
+    provider.provider().env_vars()
 }
 
 fn provider_env_value(provider: ProviderKind) -> Option<(&'static str, String)> {
@@ -1176,7 +1056,7 @@ fn auth_status_all_providers(store: &ConfigStore, secrets: &Secrets) -> Vec<Stri
     ));
     lines.push("-".repeat(70));
 
-    for provider in PROVIDER_LIST {
+    for provider in ProviderKind::ALL {
         let config_key = provider_config_api_key(store, provider);
         let keyring_key = provider_keyring_api_key(secrets, provider);
         let env_key = provider_env_value(provider);
@@ -1439,7 +1319,7 @@ fn run_auth_command_with_secrets(
         }
         AuthCommand::List => {
             println!("provider     config store env  active");
-            for provider in PROVIDER_LIST {
+            for provider in ProviderKind::ALL {
                 let slot = provider_slot(provider);
                 let file = provider_config_set(store, provider);
                 let keyring = (!file).then(|| provider_keyring_set(secrets, provider));
@@ -1503,7 +1383,7 @@ fn run_auth_migrate(store: &mut ConfigStore, secrets: &Secrets, dry_run: bool) -
     let mut migrated: Vec<(ProviderKind, &'static str)> = Vec::new();
     let mut warnings: Vec<String> = Vec::new();
 
-    for provider in PROVIDER_LIST {
+    for provider in ProviderKind::ALL {
         let slot = provider_slot(provider);
         let from_provider_block = store
             .config
@@ -1961,60 +1841,11 @@ fn build_tui_command(
     }
     cmd.args(passthrough);
 
-    let mut launch_provider_override = cli.provider.map(ProviderKind::from);
-    let mut keyring_bridge_provider = resolved_runtime.provider;
-    let mut keyring_bridge_api_key = resolved_runtime.api_key.as_ref();
-    let mut keyring_bridge_source = resolved_runtime.api_key_source;
+    let keyring_bridge_provider = resolved_runtime.provider;
+    let keyring_bridge_api_key = resolved_runtime.api_key.as_ref();
+    let keyring_bridge_source = resolved_runtime.api_key_source;
 
-    if !provider_is_supported_by_tui(resolved_runtime.provider) {
-        let supported = supported_tui_providers_csv();
-        match resolved_runtime.provider_source {
-            ProviderSource::Cli => {
-                bail!(
-                    "The interactive TUI does not support provider '{}' from --provider.\n\
-                     \n\
-                     Supported TUI providers: {supported}.\n\
-                     \n\
-                     To fix: remove `--provider {}` or pass a supported provider. \
-                     For this provider, use `codewhale exec --provider {} \"your prompt\"`.",
-                    resolved_runtime.provider.as_str(),
-                    resolved_runtime.provider.as_str(),
-                    resolved_runtime.provider.as_str(),
-                );
-            }
-            ProviderSource::Env(var) => {
-                bail!(
-                    "The interactive TUI does not support provider '{}' from {var}.\n\
-                     \n\
-                     Supported TUI providers: {supported}.\n\
-                     \n\
-                     To fix: unset {var} or set it to a supported provider. \
-                     For this provider, use `codewhale exec --provider {} \"your prompt\"`.",
-                    resolved_runtime.provider.as_str(),
-                    resolved_runtime.provider.as_str(),
-                );
-            }
-            ProviderSource::Config => {
-                let config_hint = cli
-                    .config
-                    .as_ref()
-                    .map(|path| path.display().to_string())
-                    .unwrap_or_else(|| "~/.codewhale/config.toml".to_string());
-                eprintln!(
-                    "Warning: provider '{}' from config is not supported by the interactive TUI; \
-                     launching with deepseek instead. Edit {config_hint} and set \
-                     provider = \"deepseek\", or pass --provider <supported-id>.",
-                    resolved_runtime.provider.as_str(),
-                );
-                launch_provider_override = Some(ProviderKind::Deepseek);
-                keyring_bridge_provider = ProviderKind::Deepseek;
-                keyring_bridge_api_key = None;
-                keyring_bridge_source = None;
-            }
-        }
-    }
-
-    if let Some(provider) = launch_provider_override {
+    if let Some(provider) = cli.provider.map(ProviderKind::from) {
         cmd.env("DEEPSEEK_PROVIDER", provider.as_str());
     }
     if matches!(keyring_bridge_source, Some(RuntimeApiKeySource::Keyring))
@@ -2062,20 +1893,10 @@ fn build_tui_command(
     }
     if let Some(api_key) = cli.api_key.as_ref() {
         cmd.env("DEEPSEEK_API_KEY", api_key);
-        if resolved_runtime.provider == ProviderKind::Openai {
-            cmd.env("OPENAI_API_KEY", api_key);
-        }
-        if resolved_runtime.provider == ProviderKind::Atlascloud {
-            cmd.env("ATLASCLOUD_API_KEY", api_key);
-        }
-        if resolved_runtime.provider == ProviderKind::WanjieArk {
-            cmd.env("WANJIE_ARK_API_KEY", api_key);
-        }
-        if resolved_runtime.provider == ProviderKind::Volcengine {
-            cmd.env("VOLCENGINE_API_KEY", api_key);
-        }
-        if resolved_runtime.provider == ProviderKind::Siliconflow {
-            cmd.env("SILICONFLOW_API_KEY", api_key);
+        for var in provider_env_vars(resolved_runtime.provider) {
+            if *var != "DEEPSEEK_API_KEY" {
+                cmd.env(var, api_key);
+            }
         }
         cmd.env("DEEPSEEK_API_KEY_SOURCE", "cli");
     }
@@ -3007,6 +2828,9 @@ mod tests {
             ("minimax", ProviderArg::Minimax),
             ("deepinfra", ProviderArg::Deepinfra),
             ("deep-infra", ProviderArg::Deepinfra),
+            ("siliconflow-cn", ProviderArg::SiliconflowCn),
+            ("siliconflow-CN", ProviderArg::SiliconflowCn),
+            ("siliconflow_china", ProviderArg::SiliconflowCn),
         ] {
             let cli = parse_ok(&[
                 "deepseek",
@@ -3255,7 +3079,7 @@ mod tests {
         // stale keyring-only-for-active-provider bug.
         assert!(probed.len() > 1, "list should probe all providers");
         assert!(
-            PROVIDER_LIST
+            ProviderKind::ALL
                 .iter()
                 .all(|p| probed.contains(&provider_slot(*p).to_string())),
             "every known provider should be probed by auth list: {:?}",
@@ -3615,6 +3439,27 @@ mod tests {
     }
 
     #[test]
+    fn cli_provider_helpers_follow_config_metadata() {
+        let registry_kinds: Vec<ProviderKind> = codewhale_config::provider::all_providers()
+            .iter()
+            .map(|provider| provider.kind())
+            .collect();
+        assert_eq!(registry_kinds, ProviderKind::ALL);
+
+        for provider in ProviderKind::ALL {
+            assert_eq!(provider_env_vars(provider), provider.provider().env_vars());
+            if provider == ProviderKind::SiliconflowCN {
+                assert_eq!(
+                    provider_slot(provider),
+                    provider_slot(ProviderKind::Siliconflow)
+                );
+            } else {
+                assert_eq!(provider_slot(provider), provider.provider().id());
+            }
+        }
+    }
+
+    #[test]
     fn build_tui_command_allows_openai_and_forwards_provider_key() {
         let _lock = env_lock();
         let dir = tempfile::TempDir::new().expect("tempdir");
@@ -3761,24 +3606,23 @@ mod tests {
     }
 
     #[test]
-    fn build_tui_command_rejects_unsupported_cli_provider_with_flag_hint() {
+    fn build_tui_command_allows_anthropic_cli_provider() {
         let _lock = env_lock();
         let (_dir, _bin) = install_fake_tui_binary();
 
-        let cli = parse_ok(&["codewhale", "doctor"]);
+        let cli = parse_ok(&["codewhale", "--provider", "anthropic", "doctor"]);
         let resolved = resolved_runtime_for_test(ProviderKind::Anthropic, ProviderSource::Cli);
 
-        let err = build_tui_command(&cli, &resolved, vec!["doctor".to_string()])
-            .expect_err("unsupported provider should fail");
-        let msg = err.to_string();
-
-        assert!(msg.contains("from --provider"), "{msg}");
-        assert!(msg.contains("remove `--provider anthropic`"), "{msg}");
-        assert!(msg.contains("Supported TUI providers:"), "{msg}");
+        let cmd = build_tui_command(&cli, &resolved, vec!["doctor".to_string()])
+            .expect("anthropic should be accepted by the facade");
+        assert_eq!(
+            command_env(&cmd, "DEEPSEEK_PROVIDER").as_deref(),
+            Some("anthropic")
+        );
     }
 
     #[test]
-    fn build_tui_command_rejects_unsupported_env_provider_with_env_hint() {
+    fn build_tui_command_allows_anthropic_env_provider() {
         let _lock = env_lock();
         let (_dir, _bin) = install_fake_tui_binary();
 
@@ -3788,17 +3632,12 @@ mod tests {
             ProviderSource::Env("DEEPSEEK_PROVIDER"),
         );
 
-        let err = build_tui_command(&cli, &resolved, vec!["doctor".to_string()])
-            .expect_err("unsupported provider should fail");
-        let msg = err.to_string();
-
-        assert!(msg.contains("from DEEPSEEK_PROVIDER"), "{msg}");
-        assert!(msg.contains("unset DEEPSEEK_PROVIDER"), "{msg}");
-        assert!(msg.contains("Supported TUI providers:"), "{msg}");
+        build_tui_command(&cli, &resolved, vec!["doctor".to_string()])
+            .expect("anthropic from provider env should be accepted by the facade");
     }
 
     #[test]
-    fn build_tui_command_config_fallback_does_not_forward_stale_keyring_secret() {
+    fn build_tui_command_bridges_anthropic_keyring_secret() {
         let _lock = env_lock();
         let (_dir, _bin) = install_fake_tui_binary();
 
@@ -3809,15 +3648,21 @@ mod tests {
         resolved.api_key_source = Some(RuntimeApiKeySource::Keyring);
 
         let cmd = build_tui_command(&cli, &resolved, vec!["doctor".to_string()])
-            .expect("config-sourced unsupported provider should fall back");
+            .expect("config-sourced anthropic provider should be accepted");
 
+        assert_eq!(command_env(&cmd, "DEEPSEEK_PROVIDER"), None);
         assert_eq!(
-            command_env(&cmd, "DEEPSEEK_PROVIDER").as_deref(),
-            Some("deepseek")
+            command_env(&cmd, "DEEPSEEK_API_KEY").as_deref(),
+            Some("anthropic-keyring-secret")
         );
-        assert_eq!(command_env(&cmd, "DEEPSEEK_API_KEY"), None);
-        assert_eq!(command_env(&cmd, "ANTHROPIC_API_KEY"), None);
-        assert_eq!(command_env(&cmd, "DEEPSEEK_API_KEY_SOURCE"), None);
+        assert_eq!(
+            command_env(&cmd, "ANTHROPIC_API_KEY").as_deref(),
+            Some("anthropic-keyring-secret")
+        );
+        assert_eq!(
+            command_env(&cmd, "DEEPSEEK_API_KEY_SOURCE").as_deref(),
+            Some("keyring")
+        );
     }
 
     #[test]
@@ -4120,61 +3965,11 @@ mod tests {
         let custom_str = custom.to_string_lossy().into_owned();
         let _bin = ScopedEnvVar::set("DEEPSEEK_TUI_BIN", &custom_str);
 
-        // (provider, cli flag, extra env vars that must be forwarded besides DEEPSEEK_API_KEY)
-        let cases: &[(ProviderKind, &str, &[&str])] = &[
-            (
-                ProviderKind::Openrouter,
-                "openrouter",
-                &["OPENROUTER_API_KEY"],
-            ),
-            (
-                ProviderKind::XiaomiMimo,
-                "xiaomi-mimo",
-                &["XIAOMI_MIMO_API_KEY", "XIAOMI_API_KEY", "MIMO_API_KEY"],
-            ),
-            (ProviderKind::Novita, "novita", &["NOVITA_API_KEY"]),
-            (
-                ProviderKind::NvidiaNim,
-                "nvidia-nim",
-                &["NVIDIA_API_KEY", "NVIDIA_NIM_API_KEY"],
-            ),
-            (ProviderKind::Fireworks, "fireworks", &["FIREWORKS_API_KEY"]),
-            (
-                ProviderKind::Siliconflow,
-                "siliconflow",
-                &["SILICONFLOW_API_KEY"],
-            ),
-            (ProviderKind::Arcee, "arcee", &["ARCEE_API_KEY"]),
-            (ProviderKind::Sglang, "sglang", &["SGLANG_API_KEY"]),
-            (ProviderKind::Vllm, "vllm", &["VLLM_API_KEY"]),
-            (ProviderKind::Ollama, "ollama", &["OLLAMA_API_KEY"]),
-            (
-                ProviderKind::Atlascloud,
-                "atlascloud",
-                &["ATLASCLOUD_API_KEY"],
-            ),
-            (
-                ProviderKind::WanjieArk,
-                "wanjie-ark",
-                &[
-                    "WANJIE_ARK_API_KEY",
-                    "WANJIE_API_KEY",
-                    "WANJIE_MAAS_API_KEY",
-                ],
-            ),
-        ];
-
-        for &(provider, flag, expected_vars) in cases {
-            let cli = parse_ok(&[
-                "codewhale",
-                "--provider",
-                flag,
-                "--workspace",
-                "/tmp/codewhale-workspace",
-            ]);
+        for provider in ProviderKind::ALL {
+            let cli = parse_ok(&["codewhale", "--workspace", "/tmp/codewhale-workspace"]);
             let resolved = ResolvedRuntimeOptions {
                 provider,
-                provider_source: ProviderSource::Cli,
+                provider_source: ProviderSource::Config,
                 model: "test-model".to_string(),
                 api_key: Some("test-key".to_string()),
                 api_key_source: Some(RuntimeApiKeySource::Keyring),
@@ -4192,29 +3987,36 @@ mod tests {
             };
 
             let cmd = build_tui_command(&cli, &resolved, Vec::new())
-                .unwrap_or_else(|e| panic!("{flag}: {e}"));
+                .unwrap_or_else(|e| panic!("{}: {e}", provider.as_str()));
 
             assert_eq!(
                 command_env(&cmd, "DEEPSEEK_API_KEY").as_deref(),
                 Some("test-key"),
-                "{flag}: DEEPSEEK_API_KEY not forwarded"
+                "{}: DEEPSEEK_API_KEY not forwarded",
+                provider.as_str()
             );
-            for var in expected_vars {
+            for var in provider_env_vars(provider)
+                .iter()
+                .filter(|var| **var != "DEEPSEEK_API_KEY")
+            {
                 assert_eq!(
                     command_env(&cmd, var).as_deref(),
                     Some("test-key"),
-                    "{flag}: {var} not forwarded"
+                    "{}: {var} not forwarded",
+                    provider.as_str()
                 );
             }
             assert_eq!(
                 command_env(&cmd, "DEEPSEEK_API_KEY_SOURCE").as_deref(),
                 Some("keyring"),
-                "{flag}: expected keyring source bridge"
+                "{}: expected keyring source bridge",
+                provider.as_str()
             );
             assert_eq!(
                 command_env(&cmd, "DEEPSEEK_AUTH_MODE"),
                 None,
-                "{flag}: auth mode should come from config/profile, not env handoff"
+                "{}: auth mode should come from config/profile, not env handoff",
+                provider.as_str()
             );
         }
     }
