@@ -6008,6 +6008,14 @@ fn exec_resume_command(session_id: &str) -> String {
     }
 }
 
+fn exec_saved_session_line(session_id: &str) -> String {
+    format!("session: {}", truncate_id(session_id))
+}
+
+fn exec_resumed_session_line(session_id: &str) -> String {
+    format!("resumed session: {}", truncate_id(session_id))
+}
+
 fn persist_exec_session(
     messages: &[Message],
     model: &str,
@@ -6252,7 +6260,7 @@ async fn run_exec_agent(
             .await?;
         loaded_session_id = Some(saved_id.clone());
         if output_format == ExecOutputFormat::Text && !json_output {
-            eprintln!("resumed session: {saved_id}");
+            eprintln!("{}", exec_resumed_session_line(&saved_id));
         }
     }
 
@@ -6498,7 +6506,7 @@ async fn run_exec_agent(
                     ) {
                         Ok(id) => {
                             if output_format == ExecOutputFormat::Text && !json_output {
-                                eprintln!("session: {id}");
+                                eprintln!("{}", exec_saved_session_line(&id));
                             }
                             Some(id)
                         }
@@ -7268,6 +7276,19 @@ mod terminal_mode_tests {
         );
         assert_eq!(parsed["meta"]["workspace"], "/tmp/work");
         assert_eq!(parsed["meta"]["message_count"], 4);
+    }
+
+    #[test]
+    fn exec_text_session_breadcrumbs_use_compact_ids() {
+        let session_id = "1234567890abcdef";
+
+        assert_eq!(exec_saved_session_line(session_id), "session: 12345678");
+        assert_eq!(
+            exec_resumed_session_line(session_id),
+            "resumed session: 12345678"
+        );
+        assert!(!exec_saved_session_line(session_id).contains(session_id));
+        assert!(!exec_resumed_session_line(session_id).contains(session_id));
     }
 
     #[test]
