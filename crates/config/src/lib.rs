@@ -1,5 +1,6 @@
 pub mod auth_source;
 pub mod provider;
+pub mod route;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{OsStr, OsString};
