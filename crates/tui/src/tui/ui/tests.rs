@@ -1729,6 +1729,99 @@ fn create_test_app() -> App {
 }
 
 #[test]
+fn hotbar_setup_save_persists_bindings_to_config_path() {
+    let tmp = TempDir::new().expect("config tempdir");
+    let config_path = tmp.path().join("config.toml");
+    std::fs::write(
+        &config_path,
+        r#"# keep model note
+model = "deepseek-v4-pro"
+
+[providers.deepseek]
+api_key = "test-key"
+"#,
+    )
+    .expect("write config");
+
+    let mut app = create_test_app();
+    app.config_path = Some(config_path.clone());
+    let mut config = Config::load(Some(config_path.clone()), None).expect("load config");
+    let bindings = vec![codewhale_config::HotbarBindingToml {
+        slot: 1,
+        action: "mode.agent".to_string(),
+        label: Some("Agent".to_string()),
+    }];
+
+    apply_hotbar_setup_saved(&mut app, &mut config, bindings.clone());
+
+    assert_eq!(config.hotbar, Some(bindings.clone()));
+    assert!(app.needs_redraw);
+    assert!(
+        app.status_message
+            .as_deref()
+            .is_some_and(|message| message.contains("Hotbar bindings saved to"))
+    );
+
+    let body = std::fs::read_to_string(&config_path).expect("read saved config");
+    assert!(body.contains("# keep model note"), "comment lost: {body}");
+    assert!(
+        body.contains("[providers.deepseek]"),
+        "provider section lost: {body}"
+    );
+    assert!(body.contains("[[hotbar]]"), "hotbar table missing: {body}");
+    let parsed: codewhale_config::ConfigToml =
+        toml::from_str(&body).expect("saved config should parse");
+    assert_eq!(parsed.hotbar, Some(bindings));
+}
+
+#[test]
+fn hotbar_setup_save_error_leaves_live_config_and_file_unchanged() {
+    let tmp = TempDir::new().expect("config tempdir");
+    let config_path = tmp.path().join("config.toml");
+    let invalid_body = "model = [\n";
+    std::fs::write(&config_path, invalid_body).expect("write malformed config");
+
+    let mut app = create_test_app();
+    app.config_path = Some(config_path.clone());
+    let original_bindings = vec![codewhale_config::HotbarBindingToml {
+        slot: 2,
+        action: "mode.plan".to_string(),
+        label: None,
+    }];
+    let mut config = Config::default();
+    config.hotbar = Some(original_bindings.clone());
+    let attempted_bindings = vec![codewhale_config::HotbarBindingToml {
+        slot: 1,
+        action: "mode.agent".to_string(),
+        label: None,
+    }];
+
+    apply_hotbar_setup_saved(&mut app, &mut config, attempted_bindings);
+
+    assert_eq!(config.hotbar, Some(original_bindings));
+    assert_eq!(
+        std::fs::read_to_string(&config_path).expect("read malformed config"),
+        invalid_body
+    );
+    assert!(
+        app.status_message
+            .as_deref()
+            .is_some_and(|message| message.contains("Failed to save Hotbar bindings"))
+    );
+    assert!(app.needs_redraw);
+    let last_system_message = app
+        .history
+        .iter()
+        .rev()
+        .find_map(|cell| match cell {
+            HistoryCell::System { content } => Some(content.as_str()),
+            _ => None,
+        })
+        .expect("failed save should add a system message");
+    assert!(last_system_message.contains("Failed to save Hotbar bindings"));
+}
+
+#[test]
 fn app_system_prompt_includes_configured_instructions() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let instructions = tmp.path().join("extra-instructions.md");

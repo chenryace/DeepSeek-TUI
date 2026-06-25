@@ -8833,6 +8833,27 @@ fn open_model_picker_for_provider(app: &mut App, provider: crate::config::ApiPro
     app.needs_redraw = true;
 }
 
+fn apply_hotbar_setup_saved(
+    app: &mut App,
+    config: &mut Config,
+    bindings: Vec<codewhale_config::HotbarBindingToml>,
+) {
+    match crate::config_persistence::persist_hotbar_bindings(app.config_path.as_deref(), &bindings)
+    {
+        Ok(path) => {
+            config.hotbar = Some(bindings);
+            app.status_message = Some(format!("Hotbar bindings saved to {}", path.display()));
+        }
+        Err(err) => {
+            app.status_message = Some(format!("Failed to save Hotbar bindings: {err}"));
+            app.add_message(HistoryCell::System {
+                content: format!("Failed to save Hotbar bindings: {err}"),
+            });
+        }
+    }
+    app.needs_redraw = true;
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn handle_view_events(
     terminal: &mut AppTerminal,
@@ -9120,9 +9141,7 @@ async fn handle_view_events(
                 }
             }
             ViewEvent::HotbarSetupSaved { bindings } => {
-                config.hotbar = Some(bindings);
-                app.status_message = Some("Hotbar bindings updated for this session.".to_string());
-                app.needs_redraw = true;
+                apply_hotbar_setup_saved(app, config, bindings);
             }
             ViewEvent::SubAgentsRefresh => {
                 app.status_message = Some("Refreshing sub-agents...".to_string());

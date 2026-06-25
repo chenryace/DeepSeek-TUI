@@ -325,7 +325,6 @@ fn provider_base_url_table_key(provider: ApiProvider) -> anyhow::Result<&'static
     }
 }
 
-#[allow(dead_code)]
 pub(crate) fn persist_hotbar_bindings(
     config_path: Option<&Path>,
     bindings: &[codewhale_config::HotbarBindingToml],
